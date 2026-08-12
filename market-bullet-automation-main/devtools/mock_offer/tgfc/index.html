@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>TGFC mock</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 480px; margin: 2rem auto; padding: 0 1rem; }
+    #f-wizard-form { border: 1px solid #ccc; padding: 1.5rem; border-radius: 8px; }
+    h2 { margin-top: 0; }
+    input, select { display: block; width: 100%; margin: 0.5rem 0 1rem; padding: 0.5rem; box-sizing: border-box; }
+    .choices { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1rem; }
+    .choices button { flex: 1 1 40%; padding: 0.75rem; cursor: pointer; }
+    #nextBtn { width: 100%; padding: 0.75rem; font-size: 1rem; cursor: pointer; background: #34d399; border: none; color: #000; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <div id="f-wizard-form">
+    <h2 id="stepTitle"></h2>
+    <div id="stepBody"></div>
+    <button type="button" id="nextBtn">NEXT</button>
+  </div>
+  <script>
+    const steps = [
+      { id: 'loanAmount', type: 'choice', title: 'Loan amount', options: ['500', '1,000', '2,500', '5,000', '35,000'] },
+      { id: 'email', type: 'text', name: 'email', title: 'Email', placeholder: 'Email Address' },
+      { id: 'ssnEC', type: 'text', name: 'ssnEC', title: 'Last 4 SSN', placeholder: 'xxxx' },
+      { id: 'lastName', type: 'names', title: 'Your name' },
+      { id: 'homePhone', type: 'text', name: 'phone', title: 'Phone', placeholder: '(xxx) xxx-xxxx' },
+      { id: 'isMilitary', type: 'choice', title: 'Active military?', options: ['Yes', 'No'] },
+      { id: 'address', type: 'text', name: 'address', title: 'Address', placeholder: 'Street address' },
+      { id: 'state', type: 'location', title: 'Home address' },
+      { id: 'residenceMonths', type: 'choice', title: 'Time at address', options: ['5 years', '4 years', '3 years', '2 years', '1 year'] },
+      { id: 'isHomeOwner', type: 'choice', title: 'Homeowner?', options: ['Own', 'Rent'] },
+      { id: 'dobY', type: 'dob', title: 'Date of birth' },
+      { id: 'incomeSource', type: 'choice', title: 'Income source', options: ['Employed', 'Benefits'] },
+      { id: 'employedMonths', type: 'choice', title: 'Time at employer', options: ['5 years', '4 years', '3 years'] },
+      { id: 'incomeFrequency', type: 'choice', title: 'Pay frequency', options: ['Weekly', 'Bi-Weekly', 'Semi-Monthly', 'Monthly'] },
+      { id: 'incomeNextDate', type: 'text', name: 'incomeNextDate', title: 'Next pay date', placeholder: 'MM/DD/YYYY' },
+      { id: 'incomeNetMonthly', type: 'text', name: 'incomeNetMonthly', title: 'Net monthly income', placeholder: '3000' },
+      { id: 'employerName', type: 'text', name: 'employerName', title: 'Employer', placeholder: 'Employer name' },
+      { id: 'driverLicense', type: 'text', name: 'driverLicense', title: 'Driver license', placeholder: 'DL number' },
+      { id: 'driverLicenseState', type: 'state', title: 'DL state', name: 'driverLicenseState' },
+      { id: 'ssn', type: 'text', name: 'ssn', title: 'SSN', placeholder: '900112233' },
+      { id: 'loanPurpose', type: 'choice', title: 'Loan purpose', options: ['Credit Card Debt', 'Debt Consolidation', 'Other'] },
+      { id: 'debt', type: 'choice', title: 'Credit card debt', options: ['None', 'Under $5,000', 'Over $5,000'] },
+      { id: 'payType', type: 'choice', title: 'Direct deposit?', options: ['Yes', 'No'] },
+      { id: 'bankMonths', type: 'choice', title: 'Time at bank', options: ['5 years', '4 years', '3 years'] },
+      { id: 'bankAccountType', type: 'choice', title: 'Account type', options: ['Checking', 'Savings'] },
+      { id: 'bankRoutingNumber', type: 'text', name: 'bankRoutingNumber', title: 'Routing number', placeholder: '021000021' },
+      { id: 'bankAccountNumber', type: 'text', name: 'bankAccountNumber', title: 'Account number', placeholder: '123456789' },
+      { id: 'finish', type: 'finish', title: 'Submit' },
+    ];
+    let idx = 0;
+    const body = document.getElementById('stepBody');
+    const title = document.getElementById('stepTitle');
+
+    function render() {
+      const s = steps[idx];
+      location.hash = s.id;
+      title.textContent = s.title;
+      body.innerHTML = '';
+      if (s.type === 'text') {
+        body.innerHTML = `<input name="${s.name}" placeholder="${s.placeholder || ''}">`;
+      } else if (s.type === 'names') {
+        body.innerHTML = `<input name="firstName" placeholder="First name"><input name="lastName" placeholder="Last name">`;
+      } else if (s.type === 'dob') {
+        let days = '';
+        for (let i=1;i<=31;i++){ const v=String(i).padStart(2,'0'); days += `<option value="${v}">${v}</option>`; }
+        let years = '';
+        for (let y=2007;y>=1940;y--) years += `<option value="${y}">${y}</option>`;
+        body.innerHTML = `<select><option value="">Choose</option><option value="01">January</option><option value="02">February</option><option value="03">March</option><option value="04">April</option><option value="05">May</option><option value="06">June</option><option value="07">July</option><option value="08">August</option><option value="09">September</option><option value="10">October</option><option value="11">November</option><option value="12">December</option></select><select><option value="">Choose</option>${days}</select><select><option value="">Choose</option>${years}</select>`;
+      } else if (s.type === 'location') {
+        body.innerHTML = `<input name="zip" maxlength="5" placeholder="ZIP"><input name="city" placeholder="Home City"><select name="state"><option value="">Select</option><option value="CA">California</option><option value="NY">New York</option><option value="TX">Texas</option><option value="FL">Florida</option><option value="WA">Washington</option></select>`;
+      } else if (s.type === 'state') {
+        body.innerHTML = `<select name="${s.name || 'state'}"><option value="">State</option><option value="CA">CA</option><option value="NY">NY</option><option value="TX">TX</option><option value="FL">FL</option></select>`;
+      } else if (s.type === 'choice') {
+        body.innerHTML = '<div class="choices">' + s.options.map(o => `<button type="button">${o}</button>`).join('') + '</div>';
+        body.querySelectorAll('button').forEach(b => b.onclick = () => advance());
+      } else if (s.type === 'finish') {
+        body.innerHTML = '<p>Mock submission — no data leaves your machine.</p>';
+      }
+    }
+
+    function advance() {
+      if (steps[idx].type === 'finish') {
+        document.body.innerHTML = '<h1>Thank you — mock submitted</h1><p>Congratulations! Your request was received.</p>';
+        return;
+      }
+      idx = Math.min(idx + 1, steps.length - 1);
+      render();
+    }
+
+    document.getElementById('nextBtn').onclick = advance;
+    render();
+  </script>
+</body>
+</html>
