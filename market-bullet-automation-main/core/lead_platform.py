@@ -1,8 +1,7 @@
 """
 core/lead_platform.py — shared layer for the lead-funnel platform.
 
-americanemergencyfund.com and mylendingwallet.com are two front-ends over the
-same lead platform: identical 31-field vocabulary (confirmed from each site's
+Several loan-funnel sites share the same lead platform: identical 31-field vocabulary (confirmed from each site's
 own JS), identical option semantics, and the same backend endpoints
 (``/?cmd=ExtApplyV2`` progressive save, ``/?cmd=RenderResult`` on completion).
 
@@ -895,7 +894,6 @@ class BasePlatformFiller:
         "rapidpaydayfund.com",
         "easycashday.com",
         "paydayed.com",
-        "americanemergencyfund.com",
         "mylendingwallet.com",
     )
 
@@ -1625,7 +1623,7 @@ class BasePlatformFiller:
             log.warning("screenshot.failed", error=str(e)[:80])
 
     # ---------------------------------------------------------- post-offer flow
-    # Shared by AEF and MyLendingWallet — same lender-match back-end.
+    # Shared post-offer lender-match back-end on several funnel sites.
 
     # Still working ("Thank you for your request / Connecting with our network of
     # trusted lenders") — wait, don't act.
@@ -1716,7 +1714,7 @@ class BasePlatformFiller:
         # to a word so it can match the offer page's Checking/Savings controls.
         at_raw = str(f.get("account_type", "") or "").strip().lower()
         account_type_word = "savings" if at_raw in ("2", "savings", "sav", "s") else "checking"
-        # Accept both key conventions: AEF/MLW use routing_number/account_number,
+        # Accept both key conventions: some sites use routing_number/account_number,
         # CashUSA (which borrows this handler) uses routing/account.
         bank_vals = {
             "routing_number": f.get("routing_number") or f.get("routing", ""),

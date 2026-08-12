@@ -37,19 +37,7 @@ load_dotenv()
 app = Flask(__name__)
 
 # ── Offers registry ───────────────────────────────────────────────────────────
-# Every offer the project knows about.  Set "enabled": False to take one out of
-# circulation without deleting anything — its filler, sheet tab, .env keys and
-# mock all stay in place, and flipping the flag back brings it straight back.
 ALL_OFFERS: dict[str, dict] = {
-    "american_emergency_fund": {
-        "name":          "American Emergency Fund",
-        "url":           "https://www.americanemergencyfund.com/",
-        "filler":        "core.form_filler_aef",
-        "color":         "#38bdf8",
-        "sheet_url_env": "SHEET_URL_AEF",
-        "sheet_ws_env":  "SHEET_WS_AEF",
-        "enabled":       False,
-    },
     "to_get_fast_cash": {
         "name":          "To Get Fast Cash",
         "url":           "https://togetfastcash.com/",
@@ -1257,9 +1245,8 @@ h1 { font-size: 1.45rem; font-weight: 700; color: #7dd3fc; letter-spacing: -.5px
       <div class="src-block">
         <label class="fld-lbl">Browser per offer</label>
         <div class="hint" style="margin-bottom:8px">
-          Choose the browser each offer opens in. Playwright's bundled
-          <b>Chromium</b> crashes on American Emergency Fund's fraud-detection
-          script; stock <b>Google Chrome</b> loads the page cleanly.
+          Choose the browser each offer opens in. Some sites reject Playwright's
+          bundled <b>Chromium</b>; stock <b>Google Chrome</b> is the safer default.
         </div>
         <div id="br-offer-list"></div>
       </div>

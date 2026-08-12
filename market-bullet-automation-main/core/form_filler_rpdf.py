@@ -1,7 +1,7 @@
 """
 core/form_filler_rpdf.py — rapidpaydayfund.com React hash-wizard automation.
 
-Unlike AEF's Bootstrap #applicantForm wizard, RPDF runs a React funnel whose
+Unlike Bootstrap wizard sites, RPDF runs a React funnel whose
 step is driven by ``location.hash`` (#loanAmount, #email, …, #finish).  Each
 step shows either a text input, a set of choice buttons, or both.
 

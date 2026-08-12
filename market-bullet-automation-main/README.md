@@ -3,22 +3,20 @@
 Reads leads from Google Sheets, rotates proxy + device fingerprint per attempt,
 fills a loan application via Playwright, and writes the result back to the sheet.
 
-Two offers:
+Four active offers:
 
 | Offer | Front-end | Sheet tab | Filler |
 |-------|-----------|-----------|--------|
-| American Emergency Fund | server-rendered Bootstrap wizard | `American Emergency Fund` | `form_filler_aef` (shared platform) |
 | To Get Fast Cash | React hash-wizard | `To Get Fast Cash` | `form_filler_tgfc` |
+| Rapid Pay Day Fund | React hash-wizard | `Rapid Pay Day Fund` | `form_filler_rpdf` |
+| Easy Cash Day | React hash-wizard | `Easy Cash Day` | `form_filler_ecd` |
+| PayDayEd | React hash-wizard | `PayDayEd` | `form_filler_pde` |
 
-Each offer carries an `enabled` flag in `ALL_OFFERS` ([app.py](app.py)); setting
-it to `False` takes an offer out of the UI without deleting anything.
+Each offer is registered in `ALL_OFFERS` ([app.py](app.py)).
 
 `core/lead_platform.py` holds the platform layer — the 31-field vocabulary,
 sheet parsing, value mapping and validation, and the browser lifecycle — and
-`form_filler_aef` subclasses it with only the site's own DOM layer. Additional
-offers plug in the same way: a filler that is interface-compatible with the
-engine (same `FormFiller`/`FormFillerError`/`process_row` contract) plus one
-entry in `ALL_OFFERS`.
+each `form_filler_*` module subclasses it with only that site's DOM layer.
 
 ---
 
@@ -41,7 +39,10 @@ lead-automation/
 │   └── lead_pacer.py       # Hour-by-hour lead release scheduler
 ├── core/
 │   ├── lead_platform.py    # shared platform layer (parsing, mapping, browser lifecycle)
-│   └── form_filler_aef.py  # americanemergencyfund.com — Bootstrap wizard DOM
+│   ├── form_filler_tgfc.py # togetfastcash.com — React hash-wizard DOM
+│   ├── form_filler_rpdf.py # rapidpaydayfund.com
+│   ├── form_filler_ecd.py  # easycashday.com
+│   └── form_filler_pde.py  # paydayed.com
 ├── logs/                   # Structured log files (git-ignored)
 └── screenshots/            # Live preview + failure captures (git-ignored)
 ```
@@ -54,14 +55,14 @@ lead-automation/
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 playwright install chromium
-playwright install chrome     # required — bundled Chromium crashes on this target
+playwright install chrome     # recommended — some sites reject bundled Chromium
 
 cp credentials.json credentials/credentials.json   # Google service account
 # edit .env with your sheet URL + proxy settings
 
 python app.py            # web UI on http://localhost:5000
 # or
-python main.py           # one headless pass over all pending rows
+python main.py           # one headless pass over all pending rows (To Get Fast Cash by default)
 ```
 
 Share the Google Sheet with the service-account email (Editor access).
@@ -120,60 +121,29 @@ provisioned sheet already has this formatting applied.
 
 ---
 
-## 🎯 The Target Form
+## 🎯 The Target Forms
 
-`americanemergencyfund.com` serves a native Bootstrap 5 wizard on the landing
-page — no iframe. One step renders at a time inside `#applicantForm`, advanced
-by `#nextBtn` (which becomes "Request Loan" on the last step).
+Each offer runs a React hash-wizard funnel. The fillers dispatch on the field
+names currently rendered in the DOM rather than on a fixed step index, so varying
+step order and returning-applicant flows are handled naturally.
 
-**Step order is decided server-side per session.** The page injects a
-`missingFields` array; only steps carrying a still-missing field are displayed.
-A returning applicant or a post-validation retry therefore sees a shorter,
-different sequence. `core/form_filler_aef.py` is written accordingly: each
-iteration reads the field names currently rendered and dispatches on those, so
-any order works and skipped or repeated steps are handled naturally. Adding a
-new step means adding one entry to the handler map.
-
-Full field/value reference is in the module docstring of
-[`core/form_filler_aef.py`](core/form_filler_aef.py).
-
-**Completion** is detected by URL: `/?cmd=RenderResult&uuid=…` (approved, or
-declined with offers) or a redirect to `offer.requestedresults.com` (declined /
-rejected / processing error). Both are recorded as delivered, with the specific
-outcome written to the sheet's `Notes` column.
+**Completion** is detected by URL change or a congratulations / result screen,
+followed by any post-redirect lender-match CTAs the site presents.
 
 ---
 
-## ⚠️ Browser Engine: use Google Chrome, not bundled Chromium
+## ⚠️ Browser Engine: use Google Chrome when possible
 
-**Playwright's bundled Chromium crashes its renderer on this site** part-way
-through loading `script.anura.io` (the advertiser's fraud-detection vendor). The
-form never renders. A stock **Google Chrome** install loads the identical page
-without trouble, headless included.
+Some advertiser pages reject Playwright's bundled Chromium. A stock **Google Chrome**
+install is the safer default, headless included.
 
-Verified by isolation:
-
-| Browser | Mode | Result |
-|---------|------|--------|
-| Google Chrome (`channel=chrome`) | headless | ✅ form renders |
-| Google Chrome (`channel=chrome`) | headed | ✅ form renders |
-| Bundled Chromium | headless | ❌ renderer crash |
-| Bundled Chromium | headed | ❌ renderer crash |
-| Bundled Chromium, `anura.io` blocked | headless | ✅ form renders |
-
-The last row shows the script is what *triggers* the crash — but since real
-Chrome executes that same script fine, this is a **Chromium build bug, not bot
-detection**. Nothing needs to be suppressed or worked around; just run Chrome.
-
-**Requirement:** Google Chrome must be installed on the host. The engine
+**Requirement:** Google Chrome should be installed on the host. The engine
 defaults to `BROWSER_CHANNEL=chrome`; Settings → Browser exposes the choice and
-a *Test Against Offer* button that loads the real page and reports whether it
-rendered or crashed. In Docker, add Chrome to the image (`playwright install
-chrome`) — the bundled Chromium alone is not sufficient for this target.
+a *Test Against Offer* button. In Docker, add Chrome to the image (`playwright install
+chrome`).
 
 If the browser crashes anyway, the lead fails with `browser_crashed` /
-`stuck` rather than hanging the engine: a crashed renderer never acknowledges
-`close()`, so teardown is left to the Playwright driver instead.
+`stuck` rather than hanging the engine.
 
 ## 🧪 Testing Without Submitting Real Applications
 
@@ -186,25 +156,16 @@ python devtools/serve_mock.py
 
 | Offer | Mock URL |
 |-------|----------|
-| American Emergency Fund | `http://127.0.0.1:8799/aef/index.html` |
 | To Get Fast Cash | `http://127.0.0.1:8799/tgfc/index.html` |
 
 Set **Settings → Target URLs** to it and press Start. Everything else is real:
 sheet read, engine, retries, live preview, status write-back.
 
-`aef/` is built from the live site's own JS (`fields.js` + `funnel.js`) — same
-field names, same option values, same `validateStep()` semantics. A pass here
-is strong evidence the real thing will work.
-
-The sheet ships with five synthetic sample rows covering different mapping
-branches (income and debt brackets, credit bands, pay frequencies, account
-types, homeowner/military flags). SSNs are in the 900-999 range the SSA never
-issues, phones use the 555-01xx block reserved for fiction, emails are
-`@example.com`, and routing numbers are real published bank ABAs because they
-must pass the checksum. **They are for the mock — do not point them at a live
-site.**
-
-Verified: AEF 5/5 Success against `aef/` (~72 s per lead).
+The sheet ships with synthetic sample rows covering different mapping
+branches. SSNs are in the 900-999 range the SSA never issues, phones use the
+555-01xx block reserved for fiction, emails are `@example.com`, and routing
+numbers are real published bank ABAs because they must pass the checksum.
+**They are for the mock — do not point them at a live site.**
 
 ---
 
@@ -227,9 +188,11 @@ Verified: AEF 5/5 Success against `aef/` (~72 s per lead).
 | `GOOGLE_SERVICE_ACCOUNT_FILE` | `credentials/credentials.json` | SA key path |
 | `GOOGLE_SHEET_URL` | — | Sheet URL or ID |
 | `GOOGLE_SHEET_WORKSHEET` | `Sheet1` | Tab name |
-| `SHEET_URL_AEF` / `SHEET_WS_AEF` | — | Per-offer override; blank falls back to the two above |
 | `SHEET_URL_TGFC` / `SHEET_WS_TGFC` | — | To Get Fast Cash sheet override |
-| `BROWSER_CHANNEL` | `chrome` | `chrome` \| `chromium` \| `msedge`. Bundled `chromium` crashes on this target |
+| `SHEET_URL_RPDF` / `SHEET_WS_RPDF` | — | Rapid Pay Day Fund sheet override |
+| `SHEET_URL_ECD` / `SHEET_WS_ECD` | — | Easy Cash Day sheet override |
+| `SHEET_URL_PDE` / `SHEET_WS_PDE` | — | PayDayEd sheet override |
+| `BROWSER_CHANNEL` | `chrome` | `chrome` \| `chromium` \| `msedge` |
 | `PROXY_SOURCE` | `file` | `file`, `env`, `rotating`, or `none` |
 | `PROXY_LIST` | — | Comma-separated proxies (source=env) |
 | `ROTATING_PROXY_URL` | — | Single rotating endpoint |

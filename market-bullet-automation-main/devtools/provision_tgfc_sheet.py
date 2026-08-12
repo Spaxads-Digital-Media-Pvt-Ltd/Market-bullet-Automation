@@ -2,7 +2,7 @@
 """
 devtools/provision_tgfc_sheet.py — create the To Get Fast Cash worksheet tab.
 
-Adds a new tab to the existing spreadsheet with the same lead columns as AEF
+Adds a new tab to the existing spreadsheet with the same lead columns as the other offers
 plus TGFC-only ``Next Pay Date``.  Safe to re-run: skips creation if the tab
 already exists (unless --force-headers is passed).
 """

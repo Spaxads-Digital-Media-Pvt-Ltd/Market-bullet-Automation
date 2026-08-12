@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Normalize SSN + account numbers on AEF / TGFC / RPDF sheets."""
+"""Normalize SSN + account numbers on TGFC / RPDF / ECD / PDE sheets."""
 from __future__ import annotations
 
 import os
@@ -98,12 +98,14 @@ def main() -> None:
     )
     client = gspread.authorize(creds)
     jobs = [
-        (os.getenv("SHEET_URL_AEF") or os.getenv("GOOGLE_SHEET_URL", ""),
-         os.getenv("SHEET_WS_AEF", "American Emergency Fund")),
         (os.getenv("SHEET_URL_TGFC") or os.getenv("GOOGLE_SHEET_URL", ""),
          os.getenv("SHEET_WS_TGFC", "To Get Fast Cash")),
         (os.getenv("SHEET_URL_RPDF") or os.getenv("GOOGLE_SHEET_URL", ""),
          os.getenv("SHEET_WS_RPDF", "Rapid Pay Day Fund")),
+        (os.getenv("SHEET_URL_ECD") or os.getenv("GOOGLE_SHEET_URL", ""),
+         os.getenv("SHEET_WS_ECD", "Easy Cash Day")),
+        (os.getenv("SHEET_URL_PDE") or os.getenv("GOOGLE_SHEET_URL", ""),
+         os.getenv("SHEET_WS_PDE", "PayDayEd")),
     ]
     for url, name in jobs:
         if url:

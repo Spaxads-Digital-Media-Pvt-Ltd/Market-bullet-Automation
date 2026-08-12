@@ -2,7 +2,7 @@
 """
 devtools/provision_rpdf_sheet.py — create the Rapid Pay Day Fund worksheet tab.
 
-Adds a new tab to the existing spreadsheet with the same lead columns as AEF/TGFC
+Adds a new tab to the existing spreadsheet with the same lead columns as TGFC
 plus ``Next Pay Date``.  Safe to re-run: skips creation if the tab already exists
 (unless --force-headers is passed).
 """
