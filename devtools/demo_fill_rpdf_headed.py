@@ -45,7 +45,21 @@ def main() -> None:
         print("No Pending rows in Rapid Pay Day Fund.")
         sys.exit(1)
 
+    want_row = int(os.getenv("FILL_ROW") or "0")
+    want_email = (os.getenv("FILL_EMAIL") or "").strip().lower()
     row = pending[0]
+    if want_row:
+        match = [r for r in pending if int(r.get("_row_number") or 0) == want_row]
+        if not match:
+            print(f"No Pending row {want_row}")
+            sys.exit(1)
+        row = match[0]
+    elif want_email:
+        match = [r for r in pending if str(r.get("Email Address") or "").strip().lower() == want_email]
+        if not match:
+            print(f"No Pending row with email {want_email}")
+            sys.exit(1)
+        row = match[0]
     row_num = row["_row_number"]
     proxy_url = _rotating_proxy()
     print("=" * 60)
@@ -55,6 +69,8 @@ def main() -> None:
     print(f"  Name      : {row.get('First Name')} {row.get('Last Name')}")
     print(f"  Email     : {row.get('Email Address')}")
     print(f"  Phone     : {row.get('Phone Number')}")
+    print(f"  DOB       : {row.get('Date of Birth (DOB)')}")
+    print(f"  SSN       : {row.get('SSN Full')}")
     print(f"  Target    : {cfg['target']['url']}")
     print(f"  Proxy     : {'rotating US' if proxy_url else 'direct'}")
     print("  Watch the Chrome window — each wizard step will be filled.")

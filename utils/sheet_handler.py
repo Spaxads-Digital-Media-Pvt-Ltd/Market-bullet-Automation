@@ -235,6 +235,28 @@ class SheetHandler:
 
     # ── public API ───────────────────────────────────────────────────
 
+    def reclaim_in_progress_rows(self) -> int:
+        """Return rows stuck on 'In Progress' to Pending (crash / Stop recovery)."""
+        all_records = self._retry(
+            lambda: self._worksheet.get_all_records(numericise_ignore=["all"])
+        )
+        status_col = self._col_map.get("status", "Status")
+        reclaimed = 0
+        for idx, record in enumerate(all_records, start=2):
+            val = str(
+                record.get(status_col)
+                or record.get("Status")
+                or record.get("status")
+                or ""
+            ).strip().lower()
+            if val == "in progress":
+                self._write_status(idx, "Pending", [("notes", "[reclaimed] previous run interrupted")])
+                reclaimed += 1
+        if reclaimed:
+            log.info("sheet.reclaimed_in_progress", count=reclaimed,
+                     worksheet=self._worksheet_name)
+        return reclaimed
+
     def get_pending_rows(self) -> list[dict[str, Any]]:
         all_records = self._retry(
             lambda: self._worksheet.get_all_records(numericise_ignore=["all"])

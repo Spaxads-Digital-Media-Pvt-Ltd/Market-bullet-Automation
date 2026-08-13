@@ -45,7 +45,14 @@ def main() -> None:
         print("No Pending rows in Easy Cash Day.")
         sys.exit(1)
 
+    want_email = (os.getenv("FILL_EMAIL") or "").strip().lower()
     row = pending[0]
+    if want_email:
+        match = [r for r in pending if str(r.get("Email Address") or "").strip().lower() == want_email]
+        if not match:
+            print(f"No Pending row with email {want_email}")
+            sys.exit(1)
+        row = match[0]
     row_num = row["_row_number"]
     proxy_url = _rotating_proxy()
     print("=" * 60)

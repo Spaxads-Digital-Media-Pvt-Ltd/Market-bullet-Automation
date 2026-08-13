@@ -19,6 +19,7 @@ belongs here.
 from __future__ import annotations
 
 import os
+import random
 import re
 import time
 import uuid
@@ -680,6 +681,7 @@ class BasePlatformFiller:
             income = int(float(income_raw))
         except (ValueError, TypeError):
             income = 3000
+        monthly_income = max(1500, min(20000, income if income > 0 else 3000))
 
         return {
             "first_name":     g("First Name", "First_Name"),
@@ -695,6 +697,7 @@ class BasePlatformFiller:
             "city":           g("City"),
             "state":          self._normalize_state(g("State")),
             "loan_amount":    loan_amount,
+            "monthly_income": monthly_income,
             "income_bracket": self._bracket(income, self._NETIM_BRACKETS, self._NETIM_TOP),
             "debt_bracket":   self._debt_bracket(g("Credit Card Debt", "Debt Amount")),
             "address_months": self._tenure(g("Years at Address", "Months at Address")),
@@ -1128,38 +1131,120 @@ class BasePlatformFiller:
         note = f"clicked offer CTA ({(dest.url or '')[:70]})"
         return f"{note} → {trail}" if trail else note
 
+    def _valid_mmddyyyy(self, raw: str) -> str | None:
+        """Return MM/DD/YYYY if raw is a real adult DOB, else None."""
+        s = (raw or "").strip()
+        if not s:
+            return None
+        parsed = None
+        for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y", "%d/%m/%Y", "%m/%d/%y"):
+            try:
+                parsed = datetime.strptime(s, fmt)
+                break
+            except ValueError:
+                continue
+        if parsed is None:
+            dig = re.sub(r"\D", "", s)
+            if len(dig) == 8:
+                try:
+                    parsed = datetime.strptime(dig, "%m%d%Y")
+                except ValueError:
+                    parsed = None
+        if parsed is None:
+            return None
+        age = datetime.now().year - parsed.year - (
+            (datetime.now().month, datetime.now().day) < (parsed.month, parsed.day)
+        )
+        if age < 18 or age > 90 or not (1 <= parsed.month <= 12):
+            return None
+        return parsed.strftime("%m/%d/%Y")
+
     def _secondary_vals(self, f: dict) -> dict:
-        phone = re.sub(r"\D", "", str(f.get("phone") or ""))[-10:]
-        dob = str(f.get("dob") or "")
-        parts = dob.split("/") if dob else ["", "", ""]
+        """Sheet value when present and valid; otherwise a valid dummy.
+
+        Extra funnels (AmOne, MarketLoans, LendingForBadCredit, …) must never
+        get garbage like 31/24/9722 — that was a phone dumped into a DOB mask.
+        """
+        n = random.randint(2000, 8999)
+        d_first = random.choice(["James", "Ryan", "Emily", "Laura", "Kevin", "Megan", "Brian", "Olivia"])
+        d_last = random.choice(["Parker", "Brooks", "Hayes", "Cole", "Reed", "Walsh", "Bennett", "Foster"])
+        area = random.choice(["602", "214", "404", "503", "216", "615"])
+        exch = str(random.randint(200, 989))
+        line = f"{random.randint(1000, 9999)}"
+        d_phone = f"{area}{exch}{line}"
+        d_year, d_month, d_day = random.randint(1978, 1996), random.randint(1, 12), random.randint(1, 28)
+        zips = {
+            "90210": ("Beverly Hills", "CA"),
+            "85001": ("Phoenix", "AZ"),
+            "75201": ("Dallas", "TX"),
+            "30301": ("Atlanta", "GA"),
+            "60601": ("Chicago", "IL"),
+            "97201": ("Portland", "OR"),
+        }
+        d_zip = random.choice(list(zips))
+        d_city, d_state = zips[d_zip]
+
+        def _sheet(*keys: str, dummy: str = "") -> str:
+            for k in keys:
+                v = f.get(k)
+                if v not in (None, ""):
+                    s = str(v).strip()
+                    if s:
+                        return s
+            return dummy
+
+        phone_digits = re.sub(r"\D", "", _sheet("phone"))[-10:]
+        phone = phone_digits if len(phone_digits) == 10 else d_phone
+        dob = self._valid_mmddyyyy(_sheet("dob")) or f"{d_month:02d}/{d_day:02d}/{d_year}"
+        parts = dob.split("/")
+        income_raw = re.sub(r"\D", "", _sheet("monthly_income", dummy="4500")) or "4500"
+        try:
+            income_n = max(1500, min(20000, int(income_raw)))
+        except ValueError:
+            income_n = 4500
+        ssn_digits = re.sub(r"\D", "", _sheet("ssn"))
+        ssn = ssn_digits if len(ssn_digits) == 9 else f"{random.randint(400, 650)}{random.randint(10, 80):02d}{random.randint(1000, 8999)}"
+        routing = re.sub(r"\D", "", _sheet("routing_number", dummy="021000021")).zfill(9)[:9]
+        account = re.sub(r"\D", "", _sheet("account_number")) or str(random.randint(1000000000, 8999999999))
+        loan = _sheet("loan_amount", dummy="5000")
+        try:
+            loan_n = max(500, min(35000, int(re.sub(r"\D", "", str(loan)) or "5000")))
+        except ValueError:
+            loan_n = 5000
         reason = str(f.get("loan_reason") or "")
         if reason == "14":
             purpose = ["pay off credit cards", "credit card", "debt consolidation"]
         elif reason == "1":
             purpose = ["debt consolidation", "debt", "emergency"]
+        elif reason == "13":
+            purpose = ["emergency", "personal", "other"]
         else:
-            purpose = ["emergency", "personal", "debt consolidation", "other"]
+            purpose = ["debt consolidation", "credit card consolidation", "home improvement"]
         return {
-            "loan_amount": str(int(f.get("loan_amount") or 2500)),
-            "first_name": f.get("first_name") or "",
-            "last_name": f.get("last_name") or "",
-            "email": f.get("email") or "",
+            "loan_amount": str(loan_n),
+            "first_name": _sheet("first_name", dummy=d_first),
+            "last_name": _sheet("last_name", dummy=d_last),
+            "email": _sheet("email", dummy=f"{d_first.lower()}.{d_last.lower()}{n}@gmail.com"),
             "phone": phone,
-            "phone_fmt": f.get("phone") or "",
-            "zip": f.get("zip") or "",
-            "city": f.get("city") or "",
-            "state": f.get("state") or "",
-            "address": f.get("street_address") or "",
+            "phone_fmt": _sheet("phone", dummy=f"({area}) {exch}-{line}"),
+            "zip": _sheet("zip", dummy=d_zip)[:5].zfill(5) if _sheet("zip", dummy=d_zip) else d_zip,
+            "city": _sheet("city", dummy=d_city),
+            "state": _sheet("state", dummy=d_state),
+            "address": _sheet("street_address", dummy=f"{random.randint(100, 999)} Oak Street"),
             "dob": dob,
-            "dob_m": parts[0].lstrip("0") if len(parts) > 0 else "",
-            "dob_d": parts[1].lstrip("0") if len(parts) > 1 else "",
-            "dob_y": parts[2] if len(parts) > 2 else "",
-            "ssn": f.get("ssn") or "",
-            "income": "4500",
-            "employer": f.get("employer_name") or "",
-            "routing": f.get("routing_number") or "",
-            "account": f.get("account_number") or "",
-            "bank_name": f.get("bank_name") or "",
+            "dob_m": parts[0].lstrip("0") if parts else str(d_month),
+            "dob_d": parts[1].lstrip("0") if len(parts) > 1 else str(d_day),
+            "dob_y": parts[2] if len(parts) > 2 else str(d_year),
+            "ssn": ssn,
+            "income": str(income_n),
+            "annual_income": str(max(18000, min(180000, income_n * 12))),
+            "direct_deposit": "no" if str(f.get("is_direct_deposit") or "1") == "0" else "yes",
+            "apt": "",
+            "employer": _sheet("employer_name", dummy=random.choice(
+                ["Summit Retail LLC", "Northwind Goods", "Harbor Supply Co"])),
+            "routing": routing,
+            "account": account,
+            "bank_name": _sheet("bank_name", dummy="Chase"),
             "purpose": purpose,
         }
 
@@ -1172,7 +1257,8 @@ class BasePlatformFiller:
             && st.visibility !== 'hidden' && st.display !== 'none';
         };
         const setV = (el, val) => {
-          if (!val) return false;
+          if (val === undefined || val === null) return false;
+          val = String(val);
           const proto = el.tagName === 'TEXTAREA'
             ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
           const d = Object.getOwnPropertyDescriptor(proto, 'value');
@@ -1191,17 +1277,51 @@ class BasePlatformFiller:
           }
           const wrap = e.closest('label');
           if (wrap) s += ' '+(wrap.innerText||'');
+          const prev = e.previousElementSibling;
+          if (prev && prev.tagName === 'LABEL') s += ' '+(prev.innerText||'');
+          const parent = e.parentElement;
+          if (parent) {
+            const pl = parent.querySelector(':scope > label');
+            if (pl) s += ' '+(pl.innerText||'');
+          }
           return s.toLowerCase();
         };
-        const heading = ((document.querySelector('h1,h2,h3,.title,.headline')||{}).innerText||'')
-          + ' ' + (location.href||'');
-        const pageIsAmount = /how much|borrow|loan amount|requested amount|loan-amount/i.test(heading);
+        const heading = ((document.querySelector('h1,h2,h3,.title,.headline,legend')||{}).innerText||'')
+          + ' ' + (location.href||'') + ' ' + (location.pathname||'');
+        const pageIsDob = /\/dob\b|date of birth|birth.?date|what is your date of birth|birthday/i.test(heading);
+        const pageIsAnnual = /annual (pre-?tax )?income|pre-?tax income|yearly income|what.?s your annual/i.test(heading);
+        const pageIsIncome = /monthly[-_\/ ]?income|\/income\b|salary|gross (monthly|income)|net (monthly|income)|how much do you (make|earn)|what is your (monthly )?income/i.test(heading)
+          && !pageIsDob && !pageIsAnnual;
+        const pageIsAmount = /how much.*(borrow|need)|loan[-_\/ ]?amount|requested amount|\/loan-amount/i.test(heading)
+          && !pageIsIncome && !pageIsDob && !pageIsAnnual;
+        const incomeBad = (raw) => {
+          const d = String(raw||'').replace(/\D/g,'');
+          if (!d) return true;
+          const n = parseInt(d, 10);
+          return d.length >= 8 || n > 20000 || n < 500;
+        };
+        const annualBad = (raw) => {
+          const d = String(raw||'').replace(/\D/g,'');
+          if (!d) return true;
+          const n = parseInt(d, 10);
+          return d.length >= 8 || n < 12000 || n > 250000;
+        };
+        const dobBad = (raw) => {
+          const d = String(raw||'').replace(/\D/g,'');
+          if (d.length !== 8) return true;
+          const mm = parseInt(d.slice(0,2),10), dd = parseInt(d.slice(2,4),10), yy = parseInt(d.slice(4),10);
+          return mm < 1 || mm > 12 || dd < 1 || dd > 31 || yy < 1940 || yy > 2008;
+        };
         let n = 0;
         document.querySelectorAll('input,select,textarea').forEach(e => {
           if (!vis(e) || e.disabled || e.readOnly) return;
           const typ = (e.type||'').toLowerCase();
           if (typ === 'hidden' || typ === 'radio' || typ === 'checkbox' || typ === 'submit' || typ === 'button') return;
           const k = key(e);
+          const fieldIsDob = /dob|birth|birthday/.test(k) || pageIsDob || typ === 'date';
+          const fieldIsAnnual = (/annual|pre-?tax|yearly/.test(k) || pageIsAnnual) && !fieldIsDob;
+          const fieldIsIncome = (/income|salary|gross|net.?pay|monthly.?pay/.test(k) || pageIsIncome)
+            && !fieldIsDob && !fieldIsAnnual;
           if (e.tagName === 'SELECT') {
             const want = /state/.test(k) ? V.state
               : /month|dob.*m|birth.*m/.test(k) ? V.dob_m
@@ -1223,11 +1343,27 @@ class BasePlatformFiller:
           }
           const cur = (e.value||'').replace(/[$,\s]/g,'');
           const isEmpty = !cur || cur === '0' || cur === '00' || cur === '100';
-          if (typ === 'range' && /amount|loan|borrow/.test(k + ' ' + heading)) {
+          if (fieldIsDob) {
+            if (dobBad(cur) && setV(e, V.dob)) n++;
+            return;
+          }
+          if (/apt|suite|unit|apartment|addr2|address.?2|address.?line.?2|line.?2|addl|additional.?addr/.test(k)) {
+            if ((e.value || '').trim() && setV(e, V.apt || '')) n++;
+            return;
+          }
+          if (fieldIsAnnual) {
+            if (annualBad(cur) && setV(e, V.annual_income || String((parseInt(V.income||'4500',10)||4500)*12))) n++;
+            return;
+          }
+          if (fieldIsIncome) {
+            if (incomeBad(cur) && setV(e, V.income)) n++;
+            return;
+          }
+          if (typ === 'range' && /amount|loan|borrow/.test(k + ' ' + heading) && !pageIsIncome && !pageIsDob) {
             if (setV(e, V.loan_amount)) n++;
             return;
           }
-          if (/amount|borrow|loan.?amt|requested/.test(k) || (pageIsAmount && /number|tel|text/.test(typ))) {
+          if (!pageIsIncome && (/amount|borrow|loan.?amt|requested/.test(k) || (pageIsAmount && /number|tel|text/.test(typ)))) {
             if (setV(e, V.loan_amount)) n++;
           } else if (/first|fname|given/.test(k) && !/last/.test(k)) {
             if (isEmpty && setV(e, V.first_name)) n++;
@@ -1235,7 +1371,7 @@ class BasePlatformFiller:
             if (isEmpty && setV(e, V.last_name)) n++;
           } else if (/e-?mail/.test(k)) {
             if (isEmpty && setV(e, V.email)) n++;
-          } else if (/phone|mobile|cell/.test(k)) {
+          } else if ((/phone|mobile|cell/.test(k) || typ === 'tel') && !fieldIsIncome && !fieldIsDob && !pageIsAmount && !pageIsDob) {
             if (isEmpty && setV(e, V.phone || V.phone_fmt)) n++;
           } else if (/zip|postal/.test(k)) {
             if (isEmpty && setV(e, V.zip)) n++;
@@ -1244,9 +1380,8 @@ class BasePlatformFiller:
           } else if (/street|address/.test(k) && !/email/.test(k)) {
             if (isEmpty && setV(e, V.address)) n++;
           } else if (/ssn|social/.test(k)) {
-            if (isEmpty && setV(e, V.ssn)) n++;
-          } else if (/dob|birth/.test(k) && typ !== 'select-one') {
-            if (isEmpty && setV(e, V.dob)) n++;
+            const ssnDigits = cur.replace(/\D/g,'');
+            if (ssnDigits.length !== 9 && setV(e, V.ssn)) n++;
           } else if (/employer|company/.test(k)) {
             if (isEmpty && setV(e, V.employer)) n++;
           } else if (/routing|\baba\b/.test(k)) {
@@ -1275,24 +1410,58 @@ class BasePlatformFiller:
             return;
           }
           const cur = (e.value||'').replace(/[$,\s]/g,'');
-          if (cur && cur !== '0' && cur !== '00') return;
           const k = key(e);
+          const fieldIsDob = /dob|birth|birthday/.test(k) || pageIsDob || typ === 'date';
+          const fieldIsAnnual = (/annual|pre-?tax|yearly/.test(k) || pageIsAnnual) && !fieldIsDob;
+          const fieldIsIncome = (/income|salary|gross|net.?pay|monthly.?pay/.test(k) || pageIsIncome)
+            && !fieldIsDob && !fieldIsAnnual;
+          if (/apt|suite|unit|apartment|addr2|address.?2|address.?line.?2|line.?2|addl|additional.?addr/.test(k)) {
+            if ((e.value || '').trim()) setV(e, V.apt || '');
+            return;
+          }
+          if (fieldIsDob && dobBad(cur)) {
+            if (setV(e, V.dob)) n++;
+            return;
+          }
+          if (fieldIsAnnual && annualBad(cur)) {
+            if (setV(e, V.annual_income || String((parseInt(V.income||'4500',10)||4500)*12))) n++;
+            return;
+          }
+          if (fieldIsIncome && incomeBad(cur)) {
+            if (setV(e, V.income)) n++;
+            return;
+          }
+          if (cur && cur !== '0' && cur !== '00') return;
           let val = '';
           if (typ === 'email' || /email/.test(k)) val = V.email;
-          else if (typ === 'tel' || /phone|mobile|cell/.test(k)) val = V.phone || V.phone_fmt;
-          else if (typ === 'number' || /amount|borrow|income|salary/.test(k)) val = /income|salary/.test(k) ? V.income : V.loan_amount;
+          else if (fieldIsDob) val = V.dob;
+          else if (fieldIsAnnual) val = V.annual_income;
+          else if (fieldIsIncome) val = V.income;
+          else if ((typ === 'tel' || /phone|mobile|cell/.test(k)) && !pageIsIncome && !pageIsAmount && !pageIsDob && !pageIsAnnual)
+            val = V.phone || V.phone_fmt;
+          else if (typ === 'number' || /amount|borrow|income|salary/.test(k) || pageIsIncome || pageIsAnnual)
+            val = (pageIsAnnual || /annual|pre-?tax/.test(k)) ? (V.annual_income || V.income)
+              : (pageIsIncome || /income|salary/.test(k)) ? V.income : V.loan_amount;
           else if (/zip|postal/.test(k)) val = V.zip;
           else if (/city/.test(k)) val = V.city;
           else if (/state/.test(k)) val = V.state;
-          else if (/address|street/.test(k)) val = V.address;
+          else if (/address|street/.test(k) && !/apt|suite|unit/.test(k)) val = V.address;
           else if (/first|fname/.test(k)) val = V.first_name;
           else if (/last|lname|surname/.test(k)) val = V.last_name;
           else if (/ssn|social/.test(k)) val = V.ssn;
           else if (typ === 'date') val = (V.dob_y||'1988')+'-'+String(V.dob_m||'6').padStart(2,'0')+'-'+String(V.dob_d||'15').padStart(2,'0');
-          else if (/name/.test(k)) val = V.first_name;
-          else val = V.first_name || 'Alex';
+          else if (pageIsDob) val = V.dob;
+          else if (pageIsAnnual) val = V.annual_income;
           if (val && setV(e, val)) n++;
         });
+        if (/direct deposit|paid via direct/i.test(heading + ' ' + ((document.body && document.body.innerText) || '').slice(0, 1800))) {
+          const wantYes = String(V.direct_deposit || 'yes').toLowerCase() !== 'no';
+          document.querySelectorAll('input[type=radio]').forEach(r => {
+            const lab = (((r.labels && r.labels[0] && r.labels[0].innerText) || r.value || '') + '').toLowerCase().trim();
+            if (wantYes && /^yes\b/.test(lab) && !r.checked) { r.click(); n++; }
+            if (!wantYes && /^no\b/.test(lab) && !r.checked) { r.click(); n++; }
+          });
+        }
         document.querySelectorAll('input[type=checkbox]').forEach(c => {
           if (!vis(c) || c.checked) return;
           const k = ((c.name||'')+' '+(c.id||'')+' '+((c.labels&&c.labels[0]&&c.labels[0].innerText)||'')).toLowerCase();
@@ -1314,13 +1483,22 @@ class BasePlatformFiller:
         const skip = /(see all options|more options|advertiser|disclosure|privacy|terms|log ?in|cookie|back|cancel|notice|legal|policy|learn more|read more|article|blog)/i;
         const purposes = [
           'debt consolidation','credit card consolidation','pay off credit cards',
-          'home improvement','business','auto','emergency','personal','other','credit cards'
+          'home improvement','business','auto','emergency','personal','other','credit cards',
+          'excellent','good','fair','poor','employed','self employed','full-time','full time',
+          'monthly','bi-weekly','biweekly','weekly'
         ];
+        const short = new Set(['personal','emergency','auto','business','other','good','fair','poor','excellent','employed','monthly','weekly']);
         const preferred = (V.purpose || []).map(s => (s||'').toLowerCase());
         const matchPurpose = (raw) => {
           const low = (raw || '').toLowerCase().replace(/\s+/g, ' ').trim();
-          if (!low || skip.test(low) || low.length > 48) return '';
-          return purposes.find(p => low === p || low === p + ' loan' || low.startsWith(p)) || '';
+          if (!low || skip.test(low) || low.length > 40) return '';
+          const hits = purposes.filter(p =>
+            low === p || low === p + ' loan' || low.startsWith(p + ' ')
+            || (!short.has(p) && low.includes(p) && low.length <= p.length + 18)
+          );
+          // Parent wrappers contain every option — ignore those.
+          if (hits.length !== 1) return '';
+          return hits[0];
         };
         const rank = (hit) => {
           const i = preferred.findIndex(p => hit.includes(p) || p.includes(hit));
@@ -1337,9 +1515,10 @@ class BasePlatformFiller:
             if (l) lab = text(l);
           }
           if (!lab) {
-            const wrap = inp.closest('label,li,div,button,[role=button]');
+            const wrap = inp.closest('label,li,[role=radio],[role=option]');
             if (wrap) lab = text(wrap);
           }
+          if (lab && lab.length > 48) lab = '';
           const hit = matchPurpose(lab);
           if (hit) radioRows.push({el: inp, t: lab, hit, checked: !!inp.checked});
         });
@@ -1357,7 +1536,7 @@ class BasePlatformFiller:
         }
 
         const nodes = Array.from(document.querySelectorAll(
-          'button,[role=button],a,label,li'
+          'button,[role=button],[role=radio],[role=option],a,label,li,div,span'
         )).filter(vis);
         const tiles = [];
         for (const el of nodes) {
@@ -1413,6 +1592,44 @@ class BasePlatformFiller:
         return '';
     }"""
 
+    _JS_CLICK_EXACT_OPTION = r"""(label) => {
+        const want = String(label || '').toLowerCase().replace(/\s+/g, ' ').trim();
+        if (!want) return '';
+        const vis = e => {
+          if (!e) return false;
+          const r = e.getBoundingClientRect();
+          const st = getComputedStyle(e);
+          return r.width >= 20 && r.height >= 16
+            && st.visibility !== 'hidden' && st.display !== 'none'
+            && st.pointerEvents !== 'none';
+        };
+        const text = e => ((e.innerText || e.getAttribute('aria-label') || '') + '')
+          .replace(/\s+/g, ' ').trim();
+        const skip = /more options|see all|next|continue|privacy|terms|advertiser/i;
+        const others = /debt consolidation|credit card|home improvement|employed|excellent|good \(/i;
+        const nodes = Array.from(document.querySelectorAll(
+          'button,a,label,li,div,span,section,[role=button],[role=radio],[role=option],[role=listitem]'
+        )).filter(vis);
+        const hits = [];
+        for (const el of nodes) {
+          const t = text(el);
+          if (!t || skip.test(t)) continue;
+          const low = t.toLowerCase();
+          if (!(low === want || low === want + ' loan' || low === want + '.'
+                || (low.startsWith(want) && low.length <= want.length + 10))) continue;
+          const multi = (low.match(/debt consolidation|credit card consolidation|home improvement/g) || []).length;
+          if (multi > 1) continue;
+          hits.push({el, t, w: el.getBoundingClientRect().width * el.getBoundingClientRect().height});
+        }
+        if (!hits.length) return '';
+        hits.sort((a,b) => a.w - b.w);
+        const pick = hits[0];
+        const target = pick.el.closest('button,a,label,[role=button],[role=radio],[role=option],li') || pick.el;
+        target.scrollIntoView({block:'center', inline:'nearest'});
+        target.click();
+        return (text(target) || pick.t).slice(0, 60);
+    }"""
+
     _JS_CLICK_NEXT = r"""() => {
         const vis = e => {
           if (!e) return false;
@@ -1420,23 +1637,39 @@ class BasePlatformFiller:
           const st = getComputedStyle(e);
           return r.width >= 24 && r.height >= 18
             && st.visibility !== 'hidden' && st.display !== 'none'
+            && st.pointerEvents !== 'none'
             && !e.disabled;
         };
-        const text = e => ((e.innerText || e.value || '')+'').replace(/\s+/g,' ').trim();
+        const text = e => ((e.innerText || e.value || e.getAttribute('aria-label') || '')+'').replace(/\s+/g,' ').trim();
+        const cookie = /(accept all|accept cookies|^accept$|i agree|allow all|got it|agree and close)/i;
+        const cookieBtn = Array.from(document.querySelectorAll(
+          'button,a,[role=button],input[type=button],input[type=submit]'
+        )).filter(vis).find(e => {
+          const s = text(e);
+          return s && s.length < 40 && cookie.test(s);
+        });
+        if (cookieBtn) {
+          cookieBtn.click();
+          return text(cookieBtn).slice(0, 40);
+        }
+        const landing = /(get started|start now|start here|apply now|find\s*(my\s*)?offers?|check\s*(my\s*)?(rates?|offers?)|see\s*(my\s*)?(rates?|offers?)|show\s*(me\s*)?(results|offers)|get\s*(my\s*)?(rates?|offers?)|get pre-?qualified|unlock|compare rates|see if i qualify|personalized)/i;
+        const stepGo = /(^next$|^continue$|^proceed$|^submit$)/i;
+        const go = new RegExp(landing.source + '|' + stepGo.source, 'i');
+        const no = /(back|cancel|decline|previous|see all options|more options|disclosure|privacy|terms|log ?in|sign ?in|advertiser|notice|legal|policy)/i;
         const radios = Array.from(document.querySelectorAll('input[type=radio]')).filter(r => {
           if (vis(r)) return true;
           const lab = (r.labels && r.labels[0]) || (r.id && document.querySelector('label[for="'+r.id+'"]'));
           return !!(lab && vis(lab));
         });
-        if (radios.length && !radios.some(r => r.checked)) return '';
-        const go = /(^next$|^continue$|^proceed$|^submit$|get started|start now|start here|apply now|find\s*(my\s*)?offers?|check\s*(my\s*)?(rates?|offers?)|see\s*(my\s*)?(rates?|offers?)|show\s*(me\s*)?(results|offers)|get\s*(my\s*)?(rates?|offers?)|get pre-?qualified|unlock|compare rates)/i;
-        const no = /(back|cancel|decline|previous|see all options|more options|disclosure|privacy|terms|log ?in|sign ?in|advertiser|notice|legal|policy)/i;
+        const unanswered = radios.length && !radios.some(r => r.checked);
         const btns = Array.from(document.querySelectorAll(
           'button,input[type=submit],input[type=button],[role=button],a.btn,a.button,a'
         )).filter(vis);
         const b = btns.find(e => {
           const s = text(e);
-          return s && s.length < 36 && go.test(s) && !no.test(s);
+          if (!s || s.length > 60 || !go.test(s) || no.test(s)) return false;
+          if (unanswered && stepGo.test(s) && !landing.test(s)) return false;
+          return true;
         });
         if (!b) return '';
         b.scrollIntoView({block:'center', inline:'nearest'});
@@ -1449,31 +1682,442 @@ class BasePlatformFiller:
         return /(thank you for (your )?(app|request|submi)|application (has been )?(received|submitted|complete)|we('?| ha)ve received|no (more )?offers? available|unable to (find|match)|sorry,? we (couldn|cannot))/i.test(body.slice(0, 2500));
     }"""
 
+    _JS_SECONDARY_STOP = r"""() => {
+        const body = ((document.body && document.body.innerText) || '').toLowerCase().slice(0, 2500);
+        const h = [...document.querySelectorAll('h1,h2,h3,.title,.headline,legend,label')]
+          .map(e => (e.innerText||'').toLowerCase()).join(' ');
+        const blob = h + ' ' + body;
+        if (/(create (an? )?account|create (a )?password|set (your )?password|confirm password|new password|choose a password)/i.test(blob))
+          return 'password';
+        if (/(card number|debit card|credit card number|\bcvv\b|\bcvc\b|expir(y|ation) date|payment method|add (a )?(credit )?card|billing zip|pay now|checkout)/i.test(blob)
+            && !/credit card (debt|consolidation|balance)/i.test(blob))
+          return 'payment';
+        return '';
+    }"""
+
+    _JS_UNANSWERED_CHOICE = r"""() => {
+        const vis = e => {
+          if (!e) return false;
+          const r = e.getBoundingClientRect();
+          const st = getComputedStyle(e);
+          return r.width >= 16 && r.height >= 12
+            && st.visibility !== 'hidden' && st.display !== 'none';
+        };
+        const radios = Array.from(document.querySelectorAll('input[type=radio]')).filter(r => {
+          if (vis(r)) return true;
+          const lab = (r.labels && r.labels[0]) || (r.id && document.querySelector('label[for="'+r.id+'"]'));
+          return !!(lab && vis(lab));
+        });
+        if (radios.length && !radios.some(r => r.checked)) return true;
+        const h = [...document.querySelectorAll('h1,h2,h3,.title,.headline,legend,p,label')]
+          .map(e => (e.innerText||'')).join(' ').toLowerCase().slice(0, 1200);
+        if (/what.?s this loan for|choose the closest|credit score|employment status|how are you paid|loan for|how is your credit/.test(h)) {
+          const tiles = Array.from(document.querySelectorAll(
+            '[role=radio],label,button,[class*="option"],[class*="Option"],[class*="choice"]'
+          )).filter(vis);
+          const selected = tiles.some(el =>
+            el.getAttribute('aria-checked') === 'true'
+            || /selected|active|checked/i.test(String(el.className||'')));
+          if (tiles.length >= 2 && !selected && !radios.some(r => r.checked)) return true;
+        }
+        return false;
+    }"""
+
     _PRIMARY_CTA = (
+        r"accept all",
+        r"accept cookies",
+        r"^i agree$",
+        r"allow all",
         r"find my offers",
         r"get started",
         r"start now",
         r"start here",
+        r"see if i qualify",
         r"^next$",
         r"^continue$",
         r"apply now",
         r"see (my )?offers",
         r"see (my )?rates",
         r"check (my )?(rates|offers)",
-        r"get (my )?(rates|offers)",
+        r"get (my )?(rates?|offers?)",
         r"get pre-?qualified",
         r"show (me )?(results|offers)",
         r"compare rates",
         r"^submit$",
     )
 
-    def _click_primary_cta(self, page: Page) -> str:
+    def _secondary_page_kind(self, page: Page) -> str:
+        try:
+            data = page.evaluate(
+                """() => {
+                  const heads = [...document.querySelectorAll('h1,h2,h3,.title,.headline,legend')]
+                    .map(e => e.innerText||'').join(' ');
+                  const body = ((document.body && document.body.innerText) || '').slice(0, 900);
+                  return {
+                    heads: ((location.pathname||'')+' '+(location.href||'')+' '+heads).toLowerCase(),
+                    body: body.toLowerCase()
+                  };
+                }"""
+            ) or {}
+            heads = str(data.get("heads") or "")
+            blob = heads + " " + str(data.get("body") or "")
+        except Exception:
+            heads = (page.url or "").lower()
+            blob = heads
+        if re.search(r"unable to verify|social security number|confirmation\.html", blob, re.I):
+            return "ssn"
+        if re.search(r"annual (pre-?tax )?income|pre-?tax income|yearly income|what.?s your annual", blob, re.I):
+            return "annual_income"
+        if re.search(r"/dob\b|date of birth|birth.?date|what is your date of birth|\bbirthday\b", blob, re.I):
+            return "dob"
+        if re.search(
+            r"monthly[-_/ ]?income|/income\b|salary|gross.?pay|net.?pay|"
+            r"how much do you (make|earn)|what is your (monthly )?income",
+            blob,
+            re.I,
+        ):
+            return "income"
+        if re.search(r"loan[-_/ ]?amount|how much.*(borrow|need)|requested amount", blob, re.I):
+            return "amount"
+        if re.search(
+            r"what.?s this loan for|choose the closest|employment status|"
+            r"how are you paid|how is your credit|what is your credit score",
+            heads, re.I,
+        ):
+            return "choice"
+        return ""
+
+    def _type_secondary_dob(self, page: Page, dob: str) -> bool:
+        """Type a valid MM/DD/YYYY into masked tel/text DOB fields."""
+        want = self._valid_mmddyyyy(dob) or "06/15/1988"
+        want_digits = re.sub(r"\D", "", want)
+        try:
+            boxes = page.locator(
+                "input[type='tel']:visible, input[type='text']:visible, "
+                "input[type='date']:visible, input[inputmode='numeric']:visible"
+            )
+            count = boxes.count()
+            if count == 0:
+                return False
+            box = boxes.first
+            for i in range(min(count, 6)):
+                el = boxes.nth(i)
+                meta = " ".join([
+                    el.get_attribute("name") or "",
+                    el.get_attribute("id") or "",
+                    el.get_attribute("placeholder") or "",
+                    el.get_attribute("aria-label") or "",
+                    el.get_attribute("type") or "",
+                ])
+                if re.search(r"dob|birth|date", meta, re.I):
+                    box = el
+                    break
+            cur_digits = re.sub(r"\D", "", box.input_value() or "")
+            if cur_digits == want_digits and self._valid_mmddyyyy(box.input_value() or want):
+                return False
+            box.click(timeout=4000)
+            box.press("Control+A")
+            box.press("Backspace")
+            try:
+                box.fill("")
+            except Exception:
+                pass
+            typ = (box.get_attribute("type") or "").lower()
+            if typ == "date":
+                y, m, d = want.split("/")[2], want.split("/")[0], want.split("/")[1]
+                box.fill(f"{y}-{m}-{d}")
+            else:
+                box.type(want_digits, delay=50)
+            box.press("Tab")
+            time.sleep(0.35)
+            got = re.sub(r"\D", "", box.input_value() or "")
+            return got == want_digits or bool(self._valid_mmddyyyy(box.input_value() or ""))
+        except Exception:
+            return False
+
+    def _type_secondary_ssn(self, page: Page, ssn: str) -> bool:
+        want = re.sub(r"\D", "", str(ssn or ""))
+        if len(want) != 9:
+            return False
+        try:
+            boxes = page.locator(
+                "input[type='tel']:visible, input[type='text']:visible, "
+                "input[type='password']:visible, input[inputmode='numeric']:visible"
+            )
+            count = boxes.count()
+            if count == 0:
+                return False
+            box = boxes.first
+            for i in range(min(count, 8)):
+                el = boxes.nth(i)
+                meta = " ".join([
+                    el.get_attribute("name") or "",
+                    el.get_attribute("id") or "",
+                    el.get_attribute("placeholder") or "",
+                    el.get_attribute("aria-label") or "",
+                ])
+                if re.search(r"ssn|social", meta, re.I):
+                    box = el
+                    break
+            cur = re.sub(r"\D", "", box.input_value() or "")
+            if cur == want:
+                return False
+            box.click(timeout=4000)
+            box.press("Control+A")
+            box.press("Backspace")
+            try:
+                box.fill("")
+            except Exception:
+                pass
+            box.type(want, delay=40)
+            box.press("Tab")
+            time.sleep(0.35)
+            got = re.sub(r"\D", "", box.input_value() or "")
+            return got == want or len(got) >= 9
+        except Exception:
+            return False
+
+    def _click_direct_deposit(self, page: Page, yes: bool = True) -> str:
+        try:
+            blob = page.evaluate(
+                "() => ((document.body && document.body.innerText) || '').slice(0, 2000).toLowerCase()"
+            ) or ""
+        except Exception:
+            blob = ""
+        if not re.search(r"direct deposit", blob, re.I):
+            return ""
+        label = "Yes" if yes else "No"
+        locators = [
+            page.get_by_role("radio", name=re.compile(rf"^{label}$", re.I)),
+            page.get_by_label(re.compile(rf"^{label}$", re.I)),
+            page.locator("label,button,[role=button],[role=radio],span").filter(
+                has_text=re.compile(rf"^{label}$", re.I)
+            ),
+            page.get_by_text(re.compile(rf"^{label}$", re.I)),
+        ]
+        for loc in locators:
+            try:
+                if loc.count() == 0:
+                    continue
+                el = loc.first
+                if el.is_visible():
+                    el.click(timeout=3000)
+                    return label
+            except Exception:
+                continue
+        return ""
+
+    def _type_secondary_income(self, page: Page, income: str, *, annual: bool = False) -> bool:
+        """Type monthly or annual income into masked currency/tel fields."""
+        want = re.sub(r"\D", "", str(income or "")) or ("36000" if annual else "4500")
+        lo, hi = (18000, 200000) if annual else (1500, 20000)
+        try:
+            n = int(want)
+            if n < lo or n > hi:
+                want = "36000" if annual else "4500"
+        except ValueError:
+            want = "36000" if annual else "4500"
+        try:
+            boxes = page.locator(
+                "input[type='tel']:visible, input[type='text']:visible, "
+                "input[type='number']:visible, input[inputmode='numeric']:visible, "
+                "input[inputmode='decimal']:visible"
+            )
+            count = boxes.count()
+            if count == 0:
+                return False
+            box = boxes.first
+            for i in range(min(count, 6)):
+                el = boxes.nth(i)
+                meta = " ".join([
+                    el.get_attribute("name") or "",
+                    el.get_attribute("id") or "",
+                    el.get_attribute("placeholder") or "",
+                    el.get_attribute("aria-label") or "",
+                ])
+                if re.search(r"income|salary|gross|amount|pay", meta, re.I):
+                    box = el
+                    break
+            cur = re.sub(r"\D", "", box.input_value() or "")
+            try:
+                cur_n = int(cur) if cur else 0
+            except ValueError:
+                cur_n = 0
+            if cur == want or (lo <= cur_n <= hi and (annual or len(cur) <= 5)):
+                return False
+            box.click(timeout=4000)
+            box.press("Control+A")
+            box.press("Backspace")
+            try:
+                box.fill("")
+            except Exception:
+                pass
+            box.type(want, delay=45)
+            box.press("Tab")
+            time.sleep(0.35)
+            got = re.sub(r"\D", "", box.input_value() or "")
+            try:
+                got_n = int(got) if got else 0
+            except ValueError:
+                got_n = 0
+            return got == want or lo <= got_n <= hi
+        except Exception:
+            return False
+
+    _SECONDARY_CHOICE_LABELS = (
+        "Debt Consolidation",
+        "Credit Card Consolidation",
+        "Home Improvement",
+        "Emergency",
+        "Moving",
+        "Medical",
+        "Auto",
+        "Business",
+        "Personal",
+        "Other",
+        "Excellent (720+)",
+        "Excellent",
+        "Good (680-719)",
+        "Good",
+        "Fair",
+        "Poor",
+        "Employed",
+        "Self Employed",
+        "Self-Employed",
+        "Full-Time",
+        "Full Time",
+        "Monthly",
+        "Bi-Weekly",
+        "Biweekly",
+        "Weekly",
+    )
+
+    def _unanswered_choice_page(self, page: Page) -> bool:
+        if self._visible_choice_tiles(page):
+            return True
+        try:
+            return bool(page.evaluate(self._JS_UNANSWERED_CHOICE))
+        except Exception:
+            return False
+
+    def _visible_choice_tiles(self, page: Page) -> list[str]:
+        """True option tiles only (AmOne purpose / credit / job) — not landing copy."""
+        found: list[str] = []
+        markers = (
+            "Debt Consolidation", "Credit Card Consolidation", "Home Improvement",
+            "Excellent (720+)", "Good (680-719)", "Employed", "Full-Time", "Full Time",
+        )
+        for lab in markers:
+            try:
+                loc = page.locator("button,[role=button],[role=radio],[role=option],label,li").filter(
+                    has_text=re.compile(rf"^{re.escape(lab)}$", re.I)
+                )
+                if loc.count() and loc.first.is_visible():
+                    found.append(lab)
+            except Exception:
+                continue
+        return found
+
+    def _choice_labels(self, vals: dict) -> list[str]:
+        """Sheet purpose/credit first, then other valid AmOne-style options."""
+        ordered: list[str] = []
+        for pref in vals.get("purpose") or []:
+            p = str(pref or "").strip().lower()
+            if not p:
+                continue
+            for lab in self._SECONDARY_CHOICE_LABELS:
+                if p in lab.lower() or lab.lower() in p:
+                    if lab not in ordered:
+                        ordered.append(lab)
+        for lab in self._SECONDARY_CHOICE_LABELS:
+            if lab not in ordered:
+                ordered.append(lab)
+        return ordered
+
+    def _click_label_exact(self, page: Page, label: str) -> str:
+        for fr in list(page.frames):
+            try:
+                if fr.is_detached():
+                    continue
+                hit = fr.evaluate(self._JS_CLICK_EXACT_OPTION, label) or ""
+            except Exception:
+                hit = ""
+            if hit:
+                return str(hit)[:60]
+        rx = re.compile(re.escape(label), re.I)
+        locators = [
+            page.locator("button").filter(has_text=rx),
+            page.locator("[role=button],[role=radio],[role=option],label,li").filter(has_text=rx),
+            page.get_by_text(label, exact=False),
+        ]
+        for loc in locators:
+            try:
+                n = loc.count()
+            except Exception:
+                continue
+            for i in range(min(n, 8)):
+                try:
+                    el = loc.nth(i)
+                    if not el.is_visible():
+                        continue
+                    txt = re.sub(r"\s+", " ", el.inner_text() or "").strip()
+                    if re.search(r"more options|see all|^next$|^continue$", txt, re.I):
+                        continue
+                    if len(re.findall(
+                        r"debt consolidation|credit card consolidation|home improvement",
+                        txt, re.I,
+                    )) > 1:
+                        continue
+                    if len(txt) > 64:
+                        continue
+                    if label.lower() not in txt.lower():
+                        continue
+                    el.scroll_into_view_if_needed(timeout=3000)
+                    try:
+                        el.click(timeout=4000, force=True)
+                    except Exception:
+                        el.click(timeout=4000)
+                    return (txt or label)[:60]
+                except Exception:
+                    continue
+        return ""
+
+    def _click_secondary_choice(self, page: Page, vals: dict) -> str:
+        """Pick a visible answer tile (AmOne loan purpose, credit, employment, …)."""
+        for label in self._choice_labels(vals):
+            hit = self._click_label_exact(page, label)
+            if hit:
+                return hit
+        for fr in list(page.frames):
+            try:
+                if fr.is_detached():
+                    continue
+                hit = fr.evaluate(self._JS_CLICK_CHOICE, vals) or ""
+            except Exception:
+                hit = ""
+            if hit and not re.search(r"more options|see all|^next$", str(hit), re.I):
+                return str(hit)[:60]
+        return ""
+
+    def _click_primary_cta(self, page: Page, *, force: bool = False, allow_next: bool = True) -> str:
         """Click the real step button (Find My Offers / Next / Continue), not sliders."""
+        unanswered = False if force else self._unanswered_choice_page(page)
         for pat in self._PRIMARY_CTA:
+            if (unanswered or not allow_next) and re.search(r"next|continue|submit", pat, re.I):
+                continue
             rx = re.compile(pat, re.I)
+            locators = []
             for role in ("button", "link"):
                 try:
-                    loc = page.get_by_role(role, name=rx)
+                    locators.append(page.get_by_role(role, name=rx))
+                except Exception:
+                    pass
+            try:
+                locators.append(page.get_by_text(rx))
+            except Exception:
+                pass
+            for loc in locators:
+                try:
                     if loc.count() == 0:
                         continue
                     btn = loc.first
@@ -1481,6 +2125,8 @@ class BasePlatformFiller:
                         continue
                     label = (btn.inner_text() or btn.get_attribute("value") or pat)[:40].strip()
                     if re.search(r"privacy|terms|policy|replay|advertiser", label, re.I):
+                        continue
+                    if (unanswered or not allow_next) and re.search(r"^(next|continue|submit)$", label, re.I):
                         continue
                     btn.scroll_into_view_if_needed(timeout=3000)
                     btn.click(timeout=4000)
@@ -1511,6 +2157,17 @@ class BasePlatformFiller:
             except Exception:
                 pass
 
+            stop_why = ""
+            try:
+                stop_why = str(cur.evaluate(self._JS_SECONDARY_STOP) or "")
+            except Exception:
+                stop_why = ""
+            if stop_why:
+                log.info("form.secondary_stop", reason=stop_why, row=row_number,
+                         url=(cur.url or "")[:80])
+                steps.append(f"stop:{stop_why}")
+                break
+
             done = False
             try:
                 done = bool(cur.evaluate(self._JS_SECONDARY_DONE))
@@ -1521,6 +2178,39 @@ class BasePlatformFiller:
                 steps.append("final page")
                 break
 
+            kind = self._secondary_page_kind(cur)
+            tiles = self._visible_choice_tiles(cur)
+            unanswered = bool(tiles) or kind == "choice"
+
+            # Choice tiles first — never click Next until an option is selected.
+            action = ""
+            if tiles or kind == "choice":
+                try:
+                    action = self._click_secondary_choice(cur, vals)
+                except Exception:
+                    action = ""
+                if action:
+                    log.info("form.secondary_choice", cta=action, row=row_number)
+                    idle = 0
+                    unanswered = False
+                    time.sleep(0.8)
+            elif kind not in ("dob", "income", "annual_income", "amount", "ssn"):
+                try:
+                    action = self._click_secondary_choice(cur, vals)
+                except Exception:
+                    action = ""
+                if action:
+                    log.info("form.secondary_choice", cta=action, row=row_number)
+                    idle = 0
+                    time.sleep(0.5)
+            if tiles and not action:
+                idle += 1
+                if idle >= 16:
+                    log.info("form.secondary_idle", row=row_number, url=(cur.url or "")[:80])
+                    break
+                time.sleep(0.9)
+                continue
+
             filled = 0
             for fr in list(cur.frames):
                 try:
@@ -1529,32 +2219,99 @@ class BasePlatformFiller:
                     filled += int(fr.evaluate(self._JS_FILL_SECONDARY, vals) or 0)
                 except Exception:
                     pass
+            if kind == "dob":
+                if self._type_secondary_dob(cur, vals.get("dob") or "06/15/1988"):
+                    filled += 1
+                    log.info("form.secondary_dob_typed",
+                             value=vals.get("dob"), row=row_number,
+                             url=(cur.url or "")[:80])
+            if kind == "income":
+                if self._type_secondary_income(cur, vals.get("income") or "4500"):
+                    filled += 1
+                    log.info("form.secondary_income_typed",
+                             value=vals.get("income"), row=row_number,
+                             url=(cur.url or "")[:80])
+            if kind == "annual_income":
+                annual = vals.get("annual_income") or str(int(vals.get("income") or 4500) * 12)
+                if self._type_secondary_income(cur, annual, annual=True):
+                    filled += 1
+                    log.info("form.secondary_annual_typed",
+                             value=annual, row=row_number, url=(cur.url or "")[:80])
+                dd = self._click_direct_deposit(cur, yes=str(vals.get("direct_deposit") or "yes") != "no")
+                if dd:
+                    filled += 1
+                    log.info("form.secondary_direct_deposit", cta=dd, row=row_number)
+            if kind == "ssn":
+                if self._type_secondary_ssn(cur, vals.get("ssn") or ""):
+                    filled += 1
+                    log.info("form.secondary_ssn_typed", row=row_number,
+                             url=(cur.url or "")[:80])
             if filled:
+                idle = 0
                 log.info("form.secondary_fill", count=filled, row=row_number,
                          url=(cur.url or "")[:80])
-                time.sleep(0.6)
+                time.sleep(1.0 if kind in ("dob", "income", "annual_income", "ssn") else 0.6)
 
-            # Primary CTA first (AmONE "Find My Offers", Market Loans "Next", …).
-            action = ""
+            nxt = ""
             try:
-                action = self._click_primary_cta(cur)
+                nxt = self._click_primary_cta(
+                    cur,
+                    force=kind in ("dob", "income", "annual_income", "ssn", "amount"),
+                    allow_next=not unanswered,
+                )
             except Exception:
-                action = ""
-            if action:
-                log.info("form.secondary_primary", cta=action, row=row_number)
+                nxt = ""
+            if nxt:
+                log.info("form.secondary_primary", cta=nxt, row=row_number)
+                action = f"{action} → {nxt}" if action else nxt
 
-            if not action:
-                for fr in list(cur.frames):
-                    try:
-                        if fr.is_detached():
-                            continue
-                        action = fr.evaluate(self._JS_CLICK_CHOICE, vals) or ""
-                    except Exception:
-                        action = ""
-                    if action:
-                        break
+            if not action and kind == "dob":
+                if self._type_secondary_dob(cur, vals.get("dob") or "06/15/1988"):
+                    time.sleep(0.7)
+                try:
+                    nxt = self._click_primary_cta(cur, force=True) or ""
+                except Exception:
+                    nxt = ""
+                if nxt:
+                    log.info("form.secondary_primary", cta=nxt, row=row_number)
+                    action = nxt
 
-            if not action:
+            if not action and kind == "income":
+                if self._type_secondary_income(cur, vals.get("income") or "4500"):
+                    time.sleep(0.7)
+                try:
+                    nxt = self._click_primary_cta(cur, force=True) or ""
+                except Exception:
+                    nxt = ""
+                if nxt:
+                    log.info("form.secondary_primary", cta=nxt, row=row_number)
+                    action = nxt
+
+            if not action and kind == "annual_income":
+                annual = vals.get("annual_income") or str(int(vals.get("income") or 4500) * 12)
+                self._type_secondary_income(cur, annual, annual=True)
+                self._click_direct_deposit(cur, yes=str(vals.get("direct_deposit") or "yes") != "no")
+                time.sleep(0.7)
+                try:
+                    nxt = self._click_primary_cta(cur, force=True) or ""
+                except Exception:
+                    nxt = ""
+                if nxt:
+                    log.info("form.secondary_primary", cta=nxt, row=row_number)
+                    action = nxt
+
+            if not action and kind == "ssn":
+                self._type_secondary_ssn(cur, vals.get("ssn") or "")
+                time.sleep(0.7)
+                try:
+                    nxt = self._click_primary_cta(cur, force=True) or ""
+                except Exception:
+                    nxt = ""
+                if nxt:
+                    log.info("form.secondary_primary", cta=nxt, row=row_number)
+                    action = nxt
+
+            if not action and not unanswered:
                 for fr in list(cur.frames):
                     try:
                         if fr.is_detached():
@@ -1567,6 +2324,9 @@ class BasePlatformFiller:
 
             if not action:
                 idle += 1
+                if unanswered and idle < 14:
+                    time.sleep(1.0)
+                    continue
                 if idle >= 8:
                     log.info("form.secondary_idle", row=row_number, url=(cur.url or "")[:80])
                     break
@@ -1583,6 +2343,37 @@ class BasePlatformFiller:
             if key == last_action:
                 idle += 1
                 if idle >= 3:
+                    if kind == "dob" and self._type_secondary_dob(
+                            cur, vals.get("dob") or "06/15/1988"):
+                        idle = 0
+                        last_action = ""
+                        time.sleep(0.8)
+                        continue
+                    if kind == "income" and self._type_secondary_income(
+                            cur, vals.get("income") or "4500"):
+                        idle = 0
+                        last_action = ""
+                        time.sleep(0.8)
+                        continue
+                    if kind == "annual_income":
+                        annual = vals.get("annual_income") or str(int(vals.get("income") or 4500) * 12)
+                        self._type_secondary_income(cur, annual, annual=True)
+                        self._click_direct_deposit(cur, yes=str(vals.get("direct_deposit") or "yes") != "no")
+                        idle = 0
+                        last_action = ""
+                        time.sleep(0.8)
+                        continue
+                    if kind == "ssn" and self._type_secondary_ssn(cur, vals.get("ssn") or ""):
+                        idle = 0
+                        last_action = ""
+                        time.sleep(0.8)
+                        continue
+                    retry = self._click_secondary_choice(cur, vals)
+                    if retry:
+                        idle = 0
+                        last_action = ""
+                        time.sleep(0.8)
+                        continue
                     log.info("form.secondary_last_cta", cta=action, row=row_number)
                     steps.append(f"last CTA:{action}")
                     break

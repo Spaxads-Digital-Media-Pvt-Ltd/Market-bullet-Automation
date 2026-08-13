@@ -104,6 +104,31 @@ def _save_ui_config(cfg: dict) -> None:
     UI_CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
 
 
+def _valid_offer_ids(offer_ids) -> list[str]:
+    """Drop offer ids that are disabled or removed from ALL_OFFERS."""
+    return [oid for oid in (offer_ids or []) if oid in OFFERS]
+
+
+def _sanitize_ui_config(cfg: dict) -> dict:
+    """Remove stale offer keys so removed offers cannot wedge jobs or settings."""
+    valid = set(OFFERS.keys())
+    if cfg.get("urls"):
+        cfg["urls"] = {k: v for k, v in cfg["urls"].items() if k in valid}
+    browser = cfg.get("browser") or {}
+    if browser.get("per_offer"):
+        browser["per_offer"] = {
+            k: v for k, v in browser["per_offer"].items() if k in valid
+        }
+        cfg["browser"] = browser
+    jobs = []
+    for j in cfg.get("scheduled_jobs") or []:
+        offers = _valid_offer_ids(j.get("offers"))
+        if offers:
+            jobs.append({**j, "offers": offers})
+    cfg["scheduled_jobs"] = jobs
+    return cfg
+
+
 def _current_proxy_config() -> dict:
     """Read the live proxy settings straight from the environment."""
     return {
@@ -210,8 +235,17 @@ def _clean_proxy_error(msg: str) -> str:
 
 
 # Apply any persisted overrides at import time so both the UI and the engines
-# start from the saved state.
-_apply_config(_load_ui_config())
+# start from the saved state.  Sanitize first so a removed offer cannot leave
+# scheduled jobs stuck in "running" (KeyError in the scheduler loop).
+_cfg = _sanitize_ui_config(_load_ui_config())
+if UI_CONFIG_PATH.exists():
+    try:
+        _raw = json.loads(UI_CONFIG_PATH.read_text())
+        if _raw != _cfg:
+            _save_ui_config(_cfg)
+    except Exception:
+        pass
+_apply_config(_cfg)
 
 
 # ── Lead pacing (paced scheduler mode) ─────────────────────────────────────────
@@ -410,9 +444,23 @@ def _kill_browser(offer_id: str) -> None:
     level: killing the process makes the in-flight Playwright call raise at once.
     Matched by the per-offer marker flag, so it never touches another offer's
     browser."""
+    tag = _browser_tag(offer_id)
     try:
-        subprocess.run(["pkill", "-9", "-f", _browser_tag(offer_id)],
-                       capture_output=True, timeout=10)
+        if os.name == "nt":
+            for exe in ("chrome.exe", "msedge.exe", "chromium.exe"):
+                ps = (
+                    f"Get-CimInstance Win32_Process -Filter \"Name='{exe}'\" | "
+                    f"Where-Object {{ $_.CommandLine -like '*{tag}*' }} | "
+                    f"ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force "
+                    f"-ErrorAction SilentlyContinue }}"
+                )
+                subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", ps],
+                    capture_output=True, timeout=15,
+                )
+        else:
+            subprocess.run(["pkill", "-9", "-f", tag],
+                           capture_output=True, timeout=10)
     except Exception as e:
         _log(offer_id, f"WARN  Browser force-kill failed: {type(e).__name__}: {e}")
 
@@ -517,6 +565,10 @@ def _run_engine(offer_id: str, target_url: str) -> None:
             _log(offer_id, f"INFO  Proxy pool: {proxy_mgr.total} proxy/proxies loaded")
         else:
             _log(offer_id, "WARN  No proxies -- running direct")
+
+        reclaimed = sheet.reclaim_in_progress_rows()
+        if reclaimed:
+            _log(offer_id, f"INFO  Reclaimed {reclaimed} row(s) stuck In Progress -> Pending")
 
         pending = sheet.get_pending_rows()
         if not pending:
@@ -737,6 +789,8 @@ def _run_engine(offer_id: str, target_url: str) -> None:
     finally:
         eng["running"] = False
         eng["batch"]   = {"waiting": False, "next_in": 0, "batch_num": 0}
+        eng["stop_event"].clear()
+        eng["skip_wait"].clear()
         _tl.offer_id   = None
 
 
@@ -795,15 +849,18 @@ def _launch_engine(offer_id: str, run_opts: dict | None = None) -> bool:
 
 def _job_view(job: dict) -> dict:
     """Public representation of a scheduled job (resolves live status)."""
+    offers = _valid_offer_ids(job.get("offers"))
     status = job["status"]
-    if (status == "running"
+    if not offers:
+        status = "done"
+    elif (status == "running"
             and time.time() - job.get("launched_ts", 0) > _JOB_DONE_GRACE
-            and not any(_engines[o]["running"] for o in job["offers"])):
+            and not any(_engines[o]["running"] for o in offers)):
         status = "done"
     return {
         "id":        job["id"],
-        "offers":    [OFFERS[o]["name"] for o in job["offers"]],
-        "offer_ids": job["offers"],
+        "offers":    [OFFERS[o]["name"] for o in offers],
+        "offer_ids": offers,
         "start_ts":  job["start_ts"],
         "run_opts":  job["run_opts"],
         "status":    status,
@@ -822,8 +879,9 @@ def _persist_jobs() -> None:
 
 def _load_persisted_jobs() -> None:
     for j in (_load_ui_config().get("scheduled_jobs") or []):
-        if j.get("status") == "pending" and all(o in OFFERS for o in j.get("offers", [])):
-            _scheduled_jobs[j["id"]] = j
+        offers = _valid_offer_ids(j.get("offers"))
+        if j.get("status") == "pending" and offers:
+            _scheduled_jobs[j["id"]] = {**j, "offers": offers}
 
 
 def _scheduler_loop() -> None:
@@ -835,7 +893,12 @@ def _scheduler_loop() -> None:
                 due = [j for j in _scheduled_jobs.values()
                        if j["status"] == "pending" and j["start_ts"] <= now]
             for job in due:
-                for oid in job["offers"]:
+                offers = _valid_offer_ids(job.get("offers"))
+                if not offers:
+                    with _jobs_lock:
+                        job["status"] = "done"
+                    continue
+                for oid in offers:
                     if not _engines[oid]["running"]:
                         _launch_engine(oid, job["run_opts"])
                 with _jobs_lock:
@@ -844,9 +907,14 @@ def _scheduler_loop() -> None:
             with _jobs_lock:
                 changed = False
                 for job in _scheduled_jobs.values():
+                    offers = _valid_offer_ids(job.get("offers"))
+                    if not offers:
+                        job["status"] = "done"
+                        changed = True
+                        continue
                     if (job["status"] == "running"
                             and now - job.get("launched_ts", now) > _JOB_DONE_GRACE
-                            and not any(_engines[o]["running"] for o in job["offers"])):
+                            and not any(_engines[o]["running"] for o in offers)):
                         job["status"] = "done"
                         changed = True
                 if due or changed:
@@ -2330,9 +2398,7 @@ def api_config_urls():
     for oid, u in urls.items():
         if oid in OFFERS and u:
             OFFERS[oid]["url"] = u.strip()
-    cfg = _load_ui_config()
-    # Merge rather than replace: a disabled offer is absent from OFFERS, and
-    # rewriting the map wholesale would silently drop its saved URL.
+    cfg = _sanitize_ui_config(_load_ui_config())
     saved = cfg.get("urls") or {}
     saved.update({oid: OFFERS[oid]["url"] for oid in OFFERS})
     cfg["urls"] = saved
@@ -2401,7 +2467,7 @@ def api_cancel_job(job_id: str):
         if job["status"] == "pending":
             _scheduled_jobs.pop(job_id, None)
         else:
-            for oid in job["offers"]:
+            for oid in _valid_offer_ids(job.get("offers")):
                 _engines[oid]["stop_event"].set()
                 _engines[oid]["skip_wait"].set()
                 _kill_browser(oid)
@@ -2420,7 +2486,7 @@ def api_batch_skip(offer_id: str):
     if _active_pacer is not None and _engines[offer_id].get("paced"):
         try:
             _active_pacer.recalculate_remaining()
-            for oid in _active_pacer.offers:
+            for oid in _valid_offer_ids(_active_pacer.offers):
                 _engines[oid]["skip_wait"].set()
         except Exception:
             pass
@@ -2509,7 +2575,8 @@ def api_paced_confirm():
         return jsonify({"ok": False, "msg": err})
     offers = list(offer_leads.keys())
     with _pacer_lock:
-        if _active_pacer is not None and any(_engines[o]["running"] for o in _active_pacer.offers):
+        if _active_pacer is not None and any(
+                _engines[o]["running"] for o in _valid_offer_ids(_active_pacer.offers)):
             return jsonify({"ok": False, "msg": "A paced run is already active. Stop it first."})
         try:
             start = datetime.fromisoformat(data["start_time"])
@@ -2529,13 +2596,18 @@ def api_paced_confirm():
 
 @app.route("/api/pacing/stats")
 def api_pacing_stats():
+    global _active_pacer
     if _active_pacer is None:
+        return jsonify({"active": False})
+    live_offers = _valid_offer_ids(_active_pacer.offers)
+    if not live_offers:
+        _active_pacer = None
         return jsonify({"active": False})
     stats = _active_pacer.get_pacing_stats()
     stats["active"] = True
     stats["run_id"] = _active_pacer_run_id
-    stats["offers"] = {o: OFFERS[o]["name"] for o in _active_pacer.offers}
-    stats["running"] = any(_engines[o]["running"] for o in _active_pacer.offers)
+    stats["offers"] = {o: OFFERS[o]["name"] for o in live_offers}
+    stats["running"] = any(_engines[o]["running"] for o in live_offers)
     return jsonify(stats)
 
 
