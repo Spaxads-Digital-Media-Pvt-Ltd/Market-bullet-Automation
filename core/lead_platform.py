@@ -909,6 +909,122 @@ class BasePlatformFiller:
             pass
         return page
 
+    _LEGAL_URL = re.compile(
+        r"personal-loan-notice|privacy|terms-of|terms_of|unsubscribe|"
+        r"advertiser|disclosure|/legal|/notice",
+        re.I,
+    )
+
+    def _is_legal_page(self, page: Page) -> bool:
+        try:
+            url = (page.url or "").lower()
+        except Exception:
+            return False
+        if self._LEGAL_URL.search(url):
+            return True
+        try:
+            blob = page.evaluate(
+                """() => ((document.querySelector('h1,h2,title')||{}).innerText
+                  || document.title || '').toLowerCase()"""
+            ) or ""
+        except Exception:
+            blob = ""
+        return bool(re.search(r"personal loan notice|not a lender|terms of service", blob, re.I))
+
+    def _form_page(self, page: Page) -> Page:
+        """Stay on a page that can be filled — never a legal/notice tab."""
+        try:
+            pages = [p for p in page.context.pages if not p.is_closed()]
+        except Exception:
+            return page
+        usable: list[Page] = []
+        for p in pages:
+            if self._is_source_site(p):
+                continue
+            if self._is_legal_page(p):
+                try:
+                    if len(pages) > 1:
+                        p.close()
+                except Exception:
+                    pass
+                continue
+            usable.append(p)
+        if not usable:
+            return page
+        # Finish SSN / VIEW OFFERS before switching to another tab.
+        for p in usable:
+            if self._page_needs_view_offers(p):
+                return p
+        best, best_n = usable[-1], -1
+        for p in usable:
+            try:
+                n = p.evaluate(
+                    """() => document.querySelectorAll(
+                      'input:not([type=hidden]),select,textarea,[role=radio],[role=option]'
+                    ).length"""
+                ) or 0
+            except Exception:
+                n = 0
+            if n >= best_n:
+                best, best_n = p, n
+        return best
+
+    def _page_is_done(self, page: Page) -> bool:
+        """Terminal page of an extra form. Only meaningful once the extra form
+        has been worked on — the main funnel also shows a congratulations page
+        while it redirects, and that one must be followed, not treated as done."""
+        try:
+            url = (page.url or "").lower()
+        except Exception:
+            url = ""
+        if re.search(r"/congrats|/thank", url):
+            return True
+        try:
+            return bool(page.evaluate(self._JS_SECONDARY_DONE))
+        except Exception:
+            return False
+
+    def _wait_for_congrats(self, page: Page, secs: float) -> Page | None:
+        """Wait for the extra form's congratulations page after VIEW OFFERS."""
+        until = time.time() + secs
+        while time.time() < until:
+            try:
+                pages = [p for p in page.context.pages if not p.is_closed()]
+            except Exception:
+                pages = [page]
+            for p in pages:
+                if self._page_is_done(p):
+                    return p
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=2000)
+            except Exception:
+                pass
+            time.sleep(0.5)
+        return None
+
+    def _page_needs_view_offers(self, page: Page) -> bool:
+        try:
+            url = (page.url or "").lower()
+        except Exception:
+            url = ""
+        if re.search(r"/ssn\b", url):
+            return True
+        try:
+            return bool(page.evaluate(
+                """() => {
+                  const h = ((document.body && document.body.innerText) || '')
+                    .toLowerCase().slice(0, 1600);
+                  if (!/social security number|what is your ssn/.test(h)) return false;
+                  return Array.from(document.querySelectorAll(
+                    'button,input,[role=button],a,[class*="btn"]'
+                  )).some(e => /view\\s*(my\\s*)?offers/i.test(
+                    ((e.innerText || e.value || e.getAttribute('aria-label') || '') + '')
+                  ));
+                }"""
+            ))
+        except Exception:
+            return False
+
     def _page_host(self, page: Page) -> str:
         try:
             url = (page.url or "").lower()
@@ -1220,6 +1336,26 @@ class BasePlatformFiller:
             purpose = ["emergency", "personal", "other"]
         else:
             purpose = ["debt consolidation", "credit card consolidation", "home improvement"]
+        pf = str(f.get("pay_freq") or "2")
+        if pf == "1":
+            purpose = ["weekly"] + purpose
+        elif pf == "3":
+            purpose = ["monthly"] + purpose
+        elif pf == "4":
+            purpose = ["twice a month", "semi-monthly", "semi monthly"] + purpose
+        else:
+            purpose = ["every other week", "bi-weekly", "biweekly", "twice a month"] + purpose
+        credit = str(f.get("credit_score") or "3")
+        if credit == "2":
+            purpose = ["excellent"] + purpose
+        elif credit == "4":
+            purpose = ["fair"] + purpose
+        elif credit == "5":
+            purpose = ["poor"] + purpose
+        else:
+            purpose = ["good"] + purpose
+        dd = "no" if str(f.get("is_direct_deposit") or "1") == "0" else "yes"
+        purpose = [dd] + purpose
         return {
             "loan_amount": str(loan_n),
             "first_name": _sheet("first_name", dummy=d_first),
@@ -1485,7 +1621,8 @@ class BasePlatformFiller:
           'debt consolidation','credit card consolidation','pay off credit cards',
           'home improvement','business','auto','emergency','personal','other','credit cards',
           'excellent','good','fair','poor','employed','self employed','full-time','full time',
-          'monthly','bi-weekly','biweekly','weekly'
+          'monthly','bi-weekly','biweekly','weekly','checking','savings',
+          'twice a month','every other week','semi-monthly','semi monthly'
         ];
         const short = new Set(['personal','emergency','auto','business','other','good','fair','poor','excellent','employed','monthly','weekly']);
         const preferred = (V.purpose || []).map(s => (s||'').toLowerCase());
@@ -1605,29 +1742,68 @@ class BasePlatformFiller:
         };
         const text = e => ((e.innerText || e.getAttribute('aria-label') || '') + '')
           .replace(/\s+/g, ' ').trim();
-        const skip = /more options|see all|next|continue|privacy|terms|advertiser/i;
-        const others = /debt consolidation|credit card|home improvement|employed|excellent|good \(/i;
+        const skip = /more options|see all|next|continue|privacy|terms|advertiser|learn more|read more|notice|unsubscribe|disclosure|legal|policy/i;
         const nodes = Array.from(document.querySelectorAll(
-          'button,a,label,li,div,span,section,[role=button],[role=radio],[role=option],[role=listitem]'
+          'input[type=radio],label,button,li,[role=button],[role=radio],[role=option],[role=listitem],div,span'
         )).filter(vis);
         const hits = [];
         for (const el of nodes) {
+          if (el.closest('nav,header,footer')) continue;
+          const href = ((el.closest('a') || el).getAttribute('href') || '');
+          if (/^https?:/i.test(href) && !/#/.test(href)) continue;
           const t = text(el);
-          if (!t || skip.test(t)) continue;
+          if (!t || skip.test(t) || t.length > 48) continue;
           const low = t.toLowerCase();
           if (!(low === want || low === want + ' loan' || low === want + '.'
-                || (low.startsWith(want) && low.length <= want.length + 10))) continue;
+                || (low.startsWith(want) && low.length <= want.length + 12))) continue;
           const multi = (low.match(/debt consolidation|credit card consolidation|home improvement/g) || []).length;
           if (multi > 1) continue;
-          hits.push({el, t, w: el.getBoundingClientRect().width * el.getBoundingClientRect().height});
+          const r = el.getBoundingClientRect();
+          hits.push({el, t, w: r.width * r.height});
         }
         if (!hits.length) return '';
         hits.sort((a,b) => a.w - b.w);
         const pick = hits[0];
-        const target = pick.el.closest('button,a,label,[role=button],[role=radio],[role=option],li') || pick.el;
+        const target = pick.el.closest('label,button,[role=button],[role=radio],[role=option],li') || pick.el;
         target.scrollIntoView({block:'center', inline:'nearest'});
         target.click();
+        if (pick.el.type === 'radio' && !pick.el.checked) pick.el.click();
         return (text(target) || pick.t).slice(0, 60);
+    }"""
+
+    _JS_CLICK_STACK = r"""(V) => {
+        const vis = e => {
+          if (!e) return false;
+          const r = e.getBoundingClientRect();
+          const st = getComputedStyle(e);
+          return r.width >= 40 && r.height >= 22
+            && st.visibility !== 'hidden' && st.display !== 'none'
+            && st.pointerEvents !== 'none';
+        };
+        const text = e => ((e.innerText || e.getAttribute('aria-label') || '')+'').replace(/\s+/g,' ').trim();
+        const skip = /(next|continue|submit|back|cancel|notice|privacy|terms|advertiser|unsubscribe|more options|see all|log ?in)/i;
+        const preferred = (V.purpose || []).concat([
+          String(V.direct_deposit || 'yes').toLowerCase() === 'no' ? 'no' : 'yes'
+        ]).map(s => (s||'').toLowerCase());
+        const cards = Array.from(document.querySelectorAll(
+          'button,a,[role=button],[role=radio],[role=option],label,li'
+        )).filter(vis).map(el => ({el, t: text(el)})).filter(x =>
+          x.t && x.t.length >= 2 && x.t.length <= 36
+          && !skip.test(x.t) && x.t.split(/\s+/).length <= 5
+          && !x.el.closest('nav,header,footer')
+        );
+        if (cards.length < 2) return '';
+        const score = (t) => {
+          const low = t.toLowerCase();
+          const i = preferred.findIndex(p => low === p || low.includes(p) || p.includes(low));
+          return i === -1 ? 99 : i;
+        };
+        cards.sort((a,b) => score(a.t) - score(b.t));
+        const pick = cards[0];
+        const target = pick.el.closest('button,a,label,[role=button],[role=radio]') || pick.el;
+        target.scrollIntoView({block:'center', inline:'nearest'});
+        target.click();
+        return pick.t.slice(0, 60);
     }"""
 
     _JS_CLICK_NEXT = r"""() => {
@@ -1652,7 +1828,7 @@ class BasePlatformFiller:
           cookieBtn.click();
           return text(cookieBtn).slice(0, 40);
         }
-        const landing = /(get started|start now|start here|apply now|find\s*(my\s*)?offers?|check\s*(my\s*)?(rates?|offers?)|see\s*(my\s*)?(rates?|offers?)|show\s*(me\s*)?(results|offers)|get\s*(my\s*)?(rates?|offers?)|get pre-?qualified|unlock|compare rates|see if i qualify|personalized)/i;
+        const landing = /(get started|start now|start here|apply now|find\s*(my\s*)?offers?|check\s*(my\s*)?(rates?|offers?)|see\s*(my\s*)?(rates?|offers?)|view\s*(my\s*)?offers?|show\s*(me\s*)?(results|offers)|get\s*(my\s*)?(rates?|offers?)|get pre-?qualified|unlock|compare rates|see if i qualify|personalized)/i;
         const stepGo = /(^next$|^continue$|^proceed$|^submit$)/i;
         const go = new RegExp(landing.source + '|' + stepGo.source, 'i');
         const no = /(back|cancel|decline|previous|see all options|more options|disclosure|privacy|terms|log ?in|sign ?in|advertiser|notice|legal|policy)/i;
@@ -1677,9 +1853,34 @@ class BasePlatformFiller:
         return text(b).slice(0, 40);
     }"""
 
+    _JS_CLICK_VIEW_OFFERS = r"""() => {
+        const vis = e => {
+          if (!e) return false;
+          const r = e.getBoundingClientRect();
+          const st = getComputedStyle(e);
+          return r.width >= 40 && r.height >= 18
+            && st.visibility !== 'hidden' && st.display !== 'none';
+        };
+        const text = e => ((e.innerText || e.value || e.getAttribute('aria-label') || '')+'')
+          .replace(/\s+/g,' ').trim();
+        const go = /^(view\s*(my\s*)?offers?|see\s*(my\s*)?offers?)$/i;
+        const els = Array.from(document.querySelectorAll(
+          'button,input[type=submit],input[type=button],[role=button],a.btn,a.button,[class*="btn"],[class*="Button"]'
+        ));
+        const b = els.find(e => vis(e) && go.test(text(e)) && text(e).length < 40);
+        if (!b) return '';
+        try { b.disabled = false; } catch (err) {}
+        b.scrollIntoView({block:'center', inline:'nearest'});
+        b.click();
+        return text(b).slice(0, 40);
+    }"""
+
+    # "Congratulations / you have been selected / being redirected" is NOT here:
+    # the main funnel shows that while it hands off to the extra form, and that
+    # page has to be followed into the extra form.
     _JS_SECONDARY_DONE = r"""() => {
-        const body = ((document.body && document.body.innerText) || '').toLowerCase();
-        return /(thank you for (your )?(app|request|submi)|application (has been )?(received|submitted|complete)|we('?| ha)ve received|no (more )?offers? available|unable to (find|match)|sorry,? we (couldn|cannot))/i.test(body.slice(0, 2500));
+        const body = ((document.body && document.body.innerText) || '').toLowerCase().slice(0, 2500);
+        return /(thank you for (your )?(app|request|submi)|application (has been )?(received|submitted|complete)|we('?| ha)ve received|no (more )?offers? available|unable to (find|match)|sorry,? we (couldn|cannot))/i.test(body);
     }"""
 
     _JS_SECONDARY_STOP = r"""() => {
@@ -1708,7 +1909,21 @@ class BasePlatformFiller:
           const lab = (r.labels && r.labels[0]) || (r.id && document.querySelector('label[for="'+r.id+'"]'));
           return !!(lab && vis(lab));
         });
-        if (radios.length && !radios.some(r => r.checked)) return true;
+        // Every group must be answered — one answered group is not enough when
+        // the page asks several questions at once.
+        const groups = {};
+        for (const r of radios) {
+          const k = r.name || ('__' + (r.id || Math.random()));
+          (groups[k] = groups[k] || []).push(r);
+        }
+        for (const k in groups) {
+          if (!groups[k].some(r => r.checked)) return true;
+        }
+        const selects = Array.from(document.querySelectorAll('select')).filter(vis);
+        for (const s of selects) {
+          const t = (s.options[s.selectedIndex] || {}).text || '';
+          if (!s.value || /^\s*(please )?(select|choose|--)/i.test(t)) return true;
+        }
         const h = [...document.querySelectorAll('h1,h2,h3,.title,.headline,legend,p,label')]
           .map(e => (e.innerText||'')).join(' ').toLowerCase().slice(0, 1200);
         if (/what.?s this loan for|choose the closest|credit score|employment status|how are you paid|loan for|how is your credit/.test(h)) {
@@ -1736,6 +1951,7 @@ class BasePlatformFiller:
         r"^next$",
         r"^continue$",
         r"apply now",
+        r"view (my )?offers",
         r"see (my )?offers",
         r"see (my )?rates",
         r"check (my )?(rates|offers)",
@@ -1764,7 +1980,7 @@ class BasePlatformFiller:
         except Exception:
             heads = (page.url or "").lower()
             blob = heads
-        if re.search(r"unable to verify|social security number|confirmation\.html", blob, re.I):
+        if re.search(r"/ssn\b|unable to verify|social security number|confirmation\.html", blob, re.I):
             return "ssn"
         if re.search(r"annual (pre-?tax )?income|pre-?tax income|yearly income|what.?s your annual", blob, re.I):
             return "annual_income"
@@ -1780,9 +1996,13 @@ class BasePlatformFiller:
         if re.search(r"loan[-_/ ]?amount|how much.*(borrow|need)|requested amount", blob, re.I):
             return "amount"
         if re.search(
+            r"/credit-score|/loan-purpose|/account-type|/employment|/pay-frequency|"
+            r"/income-source|/pay-type|/direct-deposit|"
             r"what.?s this loan for|choose the closest|employment status|"
-            r"how are you paid|how is your credit|what is your credit score",
-            heads, re.I,
+            r"how are you paid|how often are you paid|how is your credit|"
+            r"what is your credit score|account type|checking or saving|"
+            r"direct deposit|do you have direct",
+            blob, re.I,
         ):
             return "choice"
         return ""
@@ -1990,6 +2210,17 @@ class BasePlatformFiller:
         "Bi-Weekly",
         "Biweekly",
         "Weekly",
+        "Every Other Week",
+        "Twice A Month",
+        "Twice a Month",
+        "Semi-Monthly",
+        "Semi Monthly",
+        "Yes",
+        "No",
+        "Checking",
+        "Savings",
+        "Checking Account",
+        "Savings Account",
     )
 
     def _unanswered_choice_page(self, page: Page) -> bool:
@@ -2000,12 +2231,46 @@ class BasePlatformFiller:
         except Exception:
             return False
 
+    _JS_EMPTY_REQUIRED = r"""() => {
+        const vis = e => {
+          if (!e) return false;
+          const r = e.getBoundingClientRect();
+          const st = getComputedStyle(e);
+          return r.width >= 30 && r.height >= 12
+            && st.visibility !== 'hidden' && st.display !== 'none';
+        };
+        const out = [];
+        const els = Array.from(document.querySelectorAll(
+          'input[required],select[required],textarea[required],' +
+          '[aria-required=true],[aria-invalid=true],.error input,.invalid input'
+        ));
+        for (const e of els) {
+          const t = (e.type || '').toLowerCase();
+          if (t === 'hidden' || t === 'submit' || t === 'button') continue;
+          if (t === 'checkbox' || t === 'radio') continue;
+          if (!vis(e)) continue;
+          if (String(e.value || '').trim()) continue;
+          out.push((e.name || e.id || e.placeholder || t || 'field').slice(0, 24));
+        }
+        return out.slice(0, 8).join(',');
+    }"""
+
+    def _empty_required(self, page: Page) -> str:
+        """Names of visible required fields still blank — fill before Next."""
+        try:
+            return str(page.evaluate(self._JS_EMPTY_REQUIRED) or "")
+        except Exception:
+            return ""
+
     def _visible_choice_tiles(self, page: Page) -> list[str]:
         """True option tiles only (AmOne purpose / credit / job) — not landing copy."""
         found: list[str] = []
         markers = (
             "Debt Consolidation", "Credit Card Consolidation", "Home Improvement",
-            "Excellent (720+)", "Good (680-719)", "Employed", "Full-Time", "Full Time",
+            "Excellent (720+)", "Good (680-719)", "Good", "Fair", "Employed",
+            "Full-Time", "Full Time", "Checking", "Savings",
+            "Monthly", "Weekly", "Twice A Month", "Every Other Week",
+            "Yes", "No",
         )
         for lab in markers:
             try:
@@ -2061,7 +2326,13 @@ class BasePlatformFiller:
                     if not el.is_visible():
                         continue
                     txt = re.sub(r"\s+", " ", el.inner_text() or "").strip()
-                    if re.search(r"more options|see all|^next$|^continue$", txt, re.I):
+                    if re.search(
+                        r"more options|see all|^next$|^continue$|notice|privacy|terms|"
+                        r"unsubscribe|disclosure|advertiser",
+                        txt, re.I,
+                    ):
+                        continue
+                    if len(txt.split()) > max(4, len(label.split()) + 1):
                         continue
                     if len(re.findall(
                         r"debt consolidation|credit card consolidation|home improvement",
@@ -2095,13 +2366,63 @@ class BasePlatformFiller:
                 hit = fr.evaluate(self._JS_CLICK_CHOICE, vals) or ""
             except Exception:
                 hit = ""
-            if hit and not re.search(r"more options|see all|^next$", str(hit), re.I):
+            if hit and not re.search(r"more options|see all|^next$|notice", str(hit), re.I):
                 return str(hit)[:60]
+        for fr in list(page.frames):
+            try:
+                if fr.is_detached():
+                    continue
+                hit = fr.evaluate(self._JS_CLICK_STACK, vals) or ""
+            except Exception:
+                hit = ""
+            if hit:
+                return str(hit)[:60]
+        return ""
+
+    def _click_view_offers(self, page: Page) -> str:
+        """Click VIEW OFFERS on the SSN step — never the legal-copy mention of it."""
+        for fr in list(page.frames):
+            try:
+                if fr.is_detached():
+                    continue
+                hit = fr.evaluate(self._JS_CLICK_VIEW_OFFERS) or ""
+            except Exception:
+                hit = ""
+            if hit:
+                return str(hit)[:40]
+        rx = re.compile(r"view (my )?offers", re.I)
+        locators = [
+            page.get_by_role("button", name=rx),
+            page.get_by_role("link", name=rx),
+            page.locator("button,input[type=submit],input[type=button],[role=button]").filter(has_text=rx),
+        ]
+        for loc in locators:
+            try:
+                if loc.count() == 0:
+                    continue
+                btn = loc.first
+                if not btn.is_visible():
+                    continue
+                raw = re.sub(r"\s+", " ", (btn.inner_text() or btn.get_attribute("value") or "")).strip()
+                if len(raw) > 48:
+                    continue
+                btn.scroll_into_view_if_needed(timeout=3000)
+                try:
+                    btn.click(timeout=4000)
+                except Exception:
+                    btn.click(timeout=4000, force=True)
+                return raw[:40] or "VIEW OFFERS"
+            except Exception:
+                continue
         return ""
 
     def _click_primary_cta(self, page: Page, *, force: bool = False, allow_next: bool = True) -> str:
         """Click the real step button (Find My Offers / Next / Continue), not sliders."""
         unanswered = False if force else self._unanswered_choice_page(page)
+        if not unanswered:
+            view = self._click_view_offers(page)
+            if view:
+                return view
         for pat in self._PRIMARY_CTA:
             if (unanswered or not allow_next) and re.search(r"next|continue|submit", pat, re.I):
                 continue
@@ -2113,7 +2434,9 @@ class BasePlatformFiller:
                 except Exception:
                     pass
             try:
-                locators.append(page.get_by_text(rx))
+                locators.append(page.locator(
+                    "button,input[type=submit],input[type=button],[role=button]"
+                ).filter(has_text=rx))
             except Exception:
                 pass
             for loc in locators:
@@ -2123,8 +2446,11 @@ class BasePlatformFiller:
                     btn = loc.first
                     if not btn.is_visible():
                         continue
-                    label = (btn.inner_text() or btn.get_attribute("value") or pat)[:40].strip()
-                    if re.search(r"privacy|terms|policy|replay|advertiser", label, re.I):
+                    raw = re.sub(r"\s+", " ", (btn.inner_text() or btn.get_attribute("value") or pat)).strip()
+                    if len(raw) > 48:
+                        continue
+                    label = raw[:40]
+                    if re.search(r"privacy|terms|policy|replay|advertiser|notice|unsubscribe", label, re.I):
                         continue
                     if (unanswered or not allow_next) and re.search(r"^(next|continue|submit)$", label, re.I):
                         continue
@@ -2141,13 +2467,15 @@ class BasePlatformFiller:
         cur = page
         deadline = time.time() + 360
         steps: list[str] = []
+        choice_hits: dict[str, int] = {}
+        req_hits: dict[str, int] = {}
         last_action = ""
         idle = 0
         max_steps = 40
 
         while time.time() < deadline and len(steps) < max_steps:
             self._check_stop(stop_event)
-            cur = self._newest_page(cur)
+            cur = self._form_page(cur)
             try:
                 cur.bring_to_front()
             except Exception:
@@ -2156,6 +2484,13 @@ class BasePlatformFiller:
                 self._live(cur)
             except Exception:
                 pass
+
+            # Only a terminal page of the extra form itself ends the run. Before
+            # any extra-form step, a congrats/handoff page is just a redirect.
+            if steps and self._page_is_done(cur):
+                log.info("form.secondary_done", row=row_number, url=(cur.url or "")[:80])
+                steps.append("final page")
+                break
 
             stop_why = ""
             try:
@@ -2168,49 +2503,11 @@ class BasePlatformFiller:
                 steps.append(f"stop:{stop_why}")
                 break
 
-            done = False
-            try:
-                done = bool(cur.evaluate(self._JS_SECONDARY_DONE))
-            except Exception:
-                done = False
-            if done:
-                log.info("form.secondary_done", row=row_number, url=(cur.url or "")[:80])
-                steps.append("final page")
-                break
-
             kind = self._secondary_page_kind(cur)
             tiles = self._visible_choice_tiles(cur)
-            unanswered = bool(tiles) or kind == "choice"
+            unanswered = False if kind == "ssn" else (bool(tiles) or kind == "choice")
 
-            # Choice tiles first — never click Next until an option is selected.
-            action = ""
-            if tiles or kind == "choice":
-                try:
-                    action = self._click_secondary_choice(cur, vals)
-                except Exception:
-                    action = ""
-                if action:
-                    log.info("form.secondary_choice", cta=action, row=row_number)
-                    idle = 0
-                    unanswered = False
-                    time.sleep(0.8)
-            elif kind not in ("dob", "income", "annual_income", "amount", "ssn"):
-                try:
-                    action = self._click_secondary_choice(cur, vals)
-                except Exception:
-                    action = ""
-                if action:
-                    log.info("form.secondary_choice", cta=action, row=row_number)
-                    idle = 0
-                    time.sleep(0.5)
-            if tiles and not action:
-                idle += 1
-                if idle >= 16:
-                    log.info("form.secondary_idle", row=row_number, url=(cur.url or "")[:80])
-                    break
-                time.sleep(0.9)
-                continue
-
+            # Fill first (sheet if present, else a valid dummy). Then click CTA.
             filled = 0
             for fr in list(cur.frames):
                 try:
@@ -2250,17 +2547,71 @@ class BasePlatformFiller:
                 idle = 0
                 log.info("form.secondary_fill", count=filled, row=row_number,
                          url=(cur.url or "")[:80])
-                time.sleep(1.0 if kind in ("dob", "income", "annual_income", "ssn") else 0.6)
+                time.sleep(0.9)
+
+            action = ""
+            if kind != "ssn":
+                try:
+                    action = self._click_secondary_choice(cur, vals)
+                except Exception:
+                    action = ""
+                if not action:
+                    try:
+                        action = self._click_direct_deposit(
+                            cur, yes=str(vals.get("direct_deposit") or "yes") != "no"
+                        )
+                    except Exception:
+                        action = ""
+                if not action:
+                    try:
+                        action = cur.evaluate(self._JS_CLICK_STACK, vals) or ""
+                    except Exception:
+                        action = ""
+            if action:
+                log.info("form.secondary_choice", cta=action, row=row_number)
+                idle = 0
+                time.sleep(0.8)
+                # Another question may still be open on the same page — answer
+                # them all before moving to the next step.
+                choice_hits[action] = choice_hits.get(action, 0) + 1
+                unanswered = self._unanswered_choice_page(cur)
+                if unanswered and choice_hits[action] < 3:
+                    steps.append(action)
+                    last_action = ""
+                    continue
+                unanswered = False
+            elif unanswered:
+                idle += 1
+                if idle >= 10:
+                    log.info("form.secondary_idle", row=row_number, url=(cur.url or "")[:80])
+                    break
+                time.sleep(0.7)
+                continue
 
             nxt = ""
-            try:
-                nxt = self._click_primary_cta(
-                    cur,
-                    force=kind in ("dob", "income", "annual_income", "ssn", "amount"),
-                    allow_next=not unanswered,
-                )
-            except Exception:
-                nxt = ""
+            hold = False
+            if kind == "ssn":
+                try:
+                    nxt = self._click_view_offers(cur) or self._click_primary_cta(cur, force=True) or ""
+                except Exception:
+                    nxt = ""
+            else:
+                # A blank required field means the details are not done yet, so
+                # hold off on Next and let the fill pass run again first.
+                missing = self._empty_required(cur)
+                if missing:
+                    req_hits[missing] = req_hits.get(missing, 0) + 1
+                    log.info("form.secondary_missing", fields=missing, row=row_number,
+                             tries=req_hits[missing])
+                hold = bool(missing) and req_hits.get(missing, 0) <= 3
+                try:
+                    nxt = self._click_primary_cta(
+                        cur,
+                        force=kind in ("dob", "income", "annual_income", "amount"),
+                        allow_next=not unanswered and not hold,
+                    )
+                except Exception:
+                    nxt = ""
             if nxt:
                 log.info("form.secondary_primary", cta=nxt, row=row_number)
                 action = f"{action} → {nxt}" if action else nxt
@@ -2304,14 +2655,14 @@ class BasePlatformFiller:
                 self._type_secondary_ssn(cur, vals.get("ssn") or "")
                 time.sleep(0.7)
                 try:
-                    nxt = self._click_primary_cta(cur, force=True) or ""
+                    nxt = self._click_view_offers(cur) or self._click_primary_cta(cur, force=True) or ""
                 except Exception:
                     nxt = ""
                 if nxt:
                     log.info("form.secondary_primary", cta=nxt, row=row_number)
                     action = nxt
 
-            if not action and not unanswered:
+            if not action and not unanswered and not hold:
                 for fr in list(cur.frames):
                     try:
                         if fr.is_detached():
@@ -2324,7 +2675,7 @@ class BasePlatformFiller:
 
             if not action:
                 idle += 1
-                if unanswered and idle < 14:
+                if (unanswered or hold) and idle < 14:
                     time.sleep(1.0)
                     continue
                 if idle >= 8:
@@ -2385,9 +2736,17 @@ class BasePlatformFiller:
             print(f"\n*** Secondary CTA — {action} ***\n", flush=True)
             log.info("form.secondary_cta", cta=action, row=row_number,
                      url=(cur.url or "")[:80])
-            # Choice/next already clicked inside the evaluate. Follow any new tab.
             time.sleep(1.0)
-            cur = self._newest_page(cur)
+            # SSN → VIEW OFFERS → Congratulations ends the extra form. Whatever
+            # the lender opens after that (Wisdom Lending etc.) is left alone.
+            if kind == "ssn" and re.search(r"view\s*(my\s*)?offers", action, re.I):
+                end = self._wait_for_congrats(cur, 16)
+                cur = end or cur
+                log.info("form.secondary_done", row=row_number,
+                         url=(cur.url or "")[:80], via="view offers")
+                steps.append("congratulations")
+                break
+            cur = self._form_page(cur)
             try:
                 cur.bring_to_front()
             except Exception:
@@ -2399,9 +2758,9 @@ class BasePlatformFiller:
                     pass
             time.sleep(0.8)
 
-        self._screenshot(self._newest_page(cur), row_number, "secondary_final")
+        self._screenshot(cur, row_number, "secondary_final")
         log.info("form.secondary_trail", steps=steps, row=row_number,
-                 url=(self._newest_page(cur).url or "")[:80])
+                 url=(cur.url or "")[:80])
         return " → ".join(steps) if steps else ""
 
     def _screenshot(self, page: Page, row: int, label: str) -> None:

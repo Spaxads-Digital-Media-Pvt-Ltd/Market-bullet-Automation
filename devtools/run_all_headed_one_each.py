@@ -22,6 +22,8 @@ def main() -> None:
     env["PYTHONUTF8"] = "1"
     env["HEADLESS"] = "false"
     env["KEEP_BROWSER_SECS"] = env.get("KEEP_BROWSER_SECS", "45")
+    env.pop("FILL_ROW", None)
+    env.pop("FILL_EMAIL", None)
     py = sys.executable
     results = []
     for i, (name, script) in enumerate(DEMOS, 1):
