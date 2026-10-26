@@ -97,7 +97,7 @@ class FormFiller(BasePlatformFiller):
             next_pay = (datetime.now() + timedelta(days=14)).strftime("%m/%d/%Y")
         else:
             next_pay = self._normalize_dob(next_pay) or next_pay
-        f["next_pay_date"] = next_pay
+        f["next_pay_date"] = self._future_pay_date(next_pay)
 
         f["tgfc_loan_amount"] = str(f.get("loan_amount", 5000))
         f["tgfc_residence_months"] = _PDE_TENURE.get(f.get("address_months", "60"), "60")
@@ -903,70 +903,6 @@ class FormFiller(BasePlatformFiller):
         }
         return self._pick_choice(page, labels.get(months, "5 Years"))
 
-    def _pick_next_pay_date(self, page: Page, f: dict) -> bool:
-        """#incomeNextDate uses react-modern-calendar-datepicker (weekends disabled)."""
-        raw = f.get("next_pay_date") or ""
-        try:
-            dt = datetime.strptime(raw, "%m/%d/%Y")
-        except ValueError:
-            dt = datetime.now() + timedelta(days=14)
-        # Skip weekends — calendar disables them.
-        while dt.weekday() >= 5:
-            dt += timedelta(days=1)
-
-        # Move to the right month if needed (Next Month arrow).
-        for _ in range(6):
-            shown = page.evaluate(
-                """() => {
-                  const m = document.querySelector('.Calendar__monthYear.-shown .Calendar__monthText');
-                  const y = document.querySelector('.Calendar__monthYear.-shown .Calendar__yearText');
-                  return { month: (m&&m.innerText||'').trim(), year: (y&&y.innerText||'').trim() };
-                }"""
-            ) or {}
-            if shown.get("month") == dt.strftime("%B") and shown.get("year") == str(dt.year):
-                break
-            # Prefer next-month arrow
-            try:
-                page.locator('button[aria-label="Next Month"]').click(timeout=2000)
-            except Exception:
-                # Open month selector and click month name if enabled
-                try:
-                    page.locator(".Calendar__monthText").first.click(timeout=2000)
-                    page.locator("button.Calendar__monthSelectorItemText", has_text=dt.strftime("%B")).click(timeout=2000)
-                except Exception:
-                    break
-            time.sleep(0.4)
-
-        day = str(dt.day)
-        clicked = page.evaluate(
-            """(day) => {
-                const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
-                const cells = Array.from(document.querySelectorAll(
-                  '.Calendar__day, button.Calendar__day, .-ltr .Calendar__day'
-                )).filter(vis);
-                for (const el of cells) {
-                  if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
-                  if ((el.className||'').toString().includes('-disabled')) continue;
-                  const t = (el.innerText || el.textContent || '').trim();
-                  if (t === String(day)) { el.click(); return true; }
-                }
-                // Fallback: any element with day class
-                for (const el of Array.from(document.querySelectorAll('[class*=\"day\"]')).filter(vis)) {
-                  const t = (el.innerText || '').trim();
-                  if (t === String(day) && !/disabled/i.test(el.className||'')) {
-                    el.click(); return true;
-                  }
-                }
-                return false;
-            }""",
-            day,
-        )
-        if clicked:
-            # Calendar usually auto-advances after selecting a day.
-            self._await_step_change(page, "incomeNextDate", timeout=5)
-            return True
-        return False
-
     def _pick_income_bracket(self, page: Page, f: dict) -> bool:
         """Monthly Gross Income choice buttons on live RPDF."""
         try:
@@ -1485,7 +1421,7 @@ class FormFiller(BasePlatformFiller):
                 return True
             if self._completion_state(page, require_visual=True):
                 return True
-            time.sleep(0.4)
+            time.sleep(0.12)
         return False
 
     def _submit_finish(self, page: Page, row_number: int) -> None:

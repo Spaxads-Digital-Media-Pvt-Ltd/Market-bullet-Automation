@@ -23,7 +23,7 @@ import random
 import re
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -174,10 +174,18 @@ class BasePlatformFiller:
     def __init__(self, config: dict) -> None:
         self._config = config
         self._target = config.get("target", {})
-        self._delays = config.get("delays", {})
+        # pacing_profile: "fast" overlays delays_fast onto delays, so the
+        # speed/detectability trade-off is one switch and stays reversible.
+        self._delays = dict(config.get("delays", {}))
+        if str(config.get("pacing_profile", "normal")).lower() == "fast":
+            self._delays.update(config.get("delays_fast") or {})
         self._ss_dir = Path(config.get("screenshots", {}).get("directory", "screenshots"))
         self._ss_dir.mkdir(parents=True, exist_ok=True)
-        self._save_shots = bool(config.get("screenshots", {}).get("enabled", False))
+        _shots = config.get("screenshots", {})
+        self._save_shots = bool(_shots.get("enabled", False))
+        # on_failure stands on its own: routine step captures stay off while
+        # the shot that explains a failure is always kept.
+        self._shots_on_failure = bool(_shots.get("on_failure", True))
         self._max_steps = int(config.get("form", {}).get("max_steps", 40))
         self._crashed = False   # per-row; reset at the top of process_row
 
@@ -783,6 +791,170 @@ class BasePlatformFiller:
             return None
         today = datetime.now()
         return today.year - d.year - ((today.month, today.day) < (d.month, d.day))
+
+    # ---------------------------------------------------------- next pay date
+    # react-modern-calendar-datepicker, shared by every offer.  The widget only
+    # offers a window that opens today, so a stale sheet value in the past is
+    # unreachable: the calendar would have to navigate back beyond its own
+    # minimum.  Earlier versions walked forward blindly looking for the target
+    # month, drifted to the last selectable month and stalled there.
+
+    _CALENDAR_HOPS = 4          # months we are willing to step through
+    _MONTH_NAMES = ("January", "February", "March", "April", "May", "June",
+                    "July", "August", "September", "October", "November",
+                    "December")
+
+    def _pay_date_target(self, f: dict) -> datetime:
+        """Resolve the pay date to aim for — always in the future.
+
+        A past or unparseable sheet value is replaced with a fortnight out,
+        which is what the field means in practice."""
+        raw = (f.get("next_pay_date") or "").strip()
+        floor = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        dt = None
+        for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y"):
+            try:
+                dt = datetime.strptime(raw, fmt)
+                break
+            except ValueError:
+                pass
+        if dt is None or dt <= floor:
+            if raw:
+                log.warning("form.paydate_not_future", value=raw[:20])
+            dt = floor + timedelta(days=14)
+        while dt.weekday() >= 5:      # the calendar disables weekends
+            dt += timedelta(days=1)
+        return dt
+
+    def _future_pay_date(self, raw: str) -> str:
+        """Sheet-facing form of :meth:`_pay_date_target` — normalise a raw
+        'Next Pay Date' cell to a future weekday so a stale value never
+        reaches the browser."""
+        return self._pay_date_target({"next_pay_date": raw}).strftime("%m/%d/%Y")
+
+    _JS_CALENDAR_VIEW = r"""() => {
+        const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+        const head = document.querySelector('.Calendar__monthYear.-shown');
+        if (!head) return null;
+        const pick = s => { const e = head.querySelector(s); return e ? (e.innerText || '').trim() : ''; };
+        const days = [];
+        for (const el of Array.from(document.querySelectorAll('.Calendar__day')).filter(vis)) {
+            const cls = (el.className || '').toString();
+            if (cls.includes('-blank')) continue;
+            const n = parseInt((el.innerText || el.textContent || '').trim(), 10);
+            if (!n) continue;
+            const off = el.disabled
+                || el.getAttribute('aria-disabled') === 'true'
+                || cls.includes('-disabled');
+            if (!off) days.push(n);
+        }
+        const nav = {};
+        for (const b of Array.from(document.querySelectorAll('button')).filter(vis)) {
+            const al = (b.getAttribute('aria-label') || '').toLowerCase();
+            if (al.includes('next month')) nav.next = !b.disabled;
+            if (al.includes('previous month')) nav.prev = !b.disabled;
+        }
+        return { month: pick('.Calendar__monthText'), year: pick('.Calendar__yearText'),
+                 days: days, nav: nav };
+    }"""
+
+    def _calendar_view(self, page: Page) -> dict | None:
+        """Month on screen, its selectable day numbers, and which arrows exist."""
+        try:
+            view = page.evaluate(self._JS_CALENDAR_VIEW)
+        except Exception:
+            return None
+        if not view:
+            return None
+        month = str(view.get("month") or "").strip()
+        try:
+            view["month_num"] = self._MONTH_NAMES.index(month) + 1
+        except ValueError:
+            view["month_num"] = 0          # unknown rendering — do not navigate
+        try:
+            view["year_num"] = int(str(view.get("year") or "").strip())
+        except ValueError:
+            view["year_num"] = 0
+        view["days"] = [int(d) for d in (view.get("days") or [])]
+        view["nav"] = view.get("nav") or {}
+        return view
+
+    def _calendar_nav(self, page: Page, direction: str) -> bool:
+        """Click one month arrow.  Returns False when it is absent, which is how
+        the widget signals the edge of its allowed range."""
+        label = "Next Month" if direction == "next" else "Previous Month"
+        try:
+            loc = page.locator(f'button[aria-label="{label}"]').first
+            if loc.count() == 0 or not loc.is_visible():
+                return False
+            loc.click(timeout=1500)
+        except Exception:
+            return False
+        time.sleep(0.25)
+        return True
+
+    def _pick_next_pay_date(self, page: Page, f: dict) -> bool:
+        """Select the lead's next pay date, clamped to what the widget allows."""
+        target = self._pay_date_target(f)
+        view = self._calendar_view(page)
+        if not view:
+            return False
+
+        for _ in range(self._CALENDAR_HOPS):
+            if not view["month_num"] or not view["year_num"]:
+                break
+            here = (view["year_num"], view["month_num"])
+            want = (target.year, target.month)
+            if here == want:
+                break
+            direction = "next" if want > here else "prev"
+            if not view["nav"].get(direction) or not self._calendar_nav(page, direction):
+                log.warning("form.paydate_clamped",
+                            wanted=target.strftime("%m/%d/%Y"),
+                            showing=f"{view['month']} {view['year']}")
+                break
+            nxt = self._calendar_view(page)
+            if not nxt:
+                break
+            view = nxt
+
+        day = self._nearest_enabled_day(view["days"], target.day)
+        if day is None:
+            log.warning("form.paydate_no_day", showing=f"{view['month']} {view['year']}")
+            return False
+        if not self._calendar_click_day(page, day):
+            return False
+        # A valid day auto-advances the wizard — this step has no NEXT button.
+        self._await_step_change(page, "incomeNextDate", timeout=5)
+        return True
+
+    def _nearest_enabled_day(self, days: list[int], want: int) -> int | None:
+        """Prefer the requested day, else the closest selectable one, breaking
+        ties towards a later date so the pay date never moves backwards."""
+        if not days:
+            return None
+        return min(days, key=lambda d: (abs(d - want), -d))
+
+    def _calendar_click_day(self, page: Page, day: int) -> bool:
+        try:
+            return bool(page.evaluate(
+                r"""(day) => {
+                    const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+                    for (const el of Array.from(document.querySelectorAll('.Calendar__day')).filter(vis)) {
+                        const cls = (el.className || '').toString();
+                        if (cls.includes('-blank') || cls.includes('-disabled')) continue;
+                        if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
+                        if ((el.innerText || el.textContent || '').trim() === String(day)) {
+                            el.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }""",
+                day,
+            ))
+        except Exception:
+            return False
 
     def _normalize_state(self, raw: str) -> str:
         raw = (raw or "").strip()
@@ -2763,8 +2935,13 @@ class BasePlatformFiller:
                  url=(cur.url or "")[:80])
         return " → ".join(steps) if steps else ""
 
+    # Captures that record a normal milestone rather than a failure.
+    _INFO_SHOT_LABELS = ("post_offer_arrived",)
+
     def _screenshot(self, page: Page, row: int, label: str) -> None:
-        if not self._save_shots:
+        if not self._save_shots and not (
+                self._shots_on_failure
+                and not str(label).startswith(self._INFO_SHOT_LABELS)):
             return
         try:
             path = self._ss_dir / f"row_{row:04d}_{label}.png"

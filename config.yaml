@@ -37,6 +37,14 @@ pacing:
   catch_up_threshold: 0.30      # >30% behind triggers a catch-up warning
   timezone: "America/New_York"
 
+# --- Pacing profile ---
+# "normal" uses the delays block below.  "fast" overlays delays_fast onto it,
+# trimming every human beat to the low end of human-plausible.  The randomised
+# ranges stay — a constant delay is itself a bot signal — so this trades a
+# margin of anti-detection cover for throughput.  Flip back to "normal" if a
+# target starts rejecting submissions.
+pacing_profile: fast
+
 # --- Delays (seconds) — human-like pacing ---
 delays:
   min_typing_delay: 0.06        # Min delay between keystrokes
@@ -48,6 +56,16 @@ delays:
   # Human pacing for the browser filler:
   read_pause:  [0.5, 1.2]       # beat after a step renders — "reading the question"
   field_pause: [0.35, 0.8]      # beat between fields within a multi-field step
+
+# Overlay applied when pacing_profile is "fast".
+delays_fast:
+  min_typing_delay: 0.03
+  max_typing_delay: 0.08
+  min_action_delay: 0.30
+  max_action_delay: 0.90
+  page_load_wait: 1.5
+  read_pause:  [0.30, 0.70]
+  field_pause: [0.20, 0.45]
 
 # --- Device Emulation Defaults ---
 # These apply when Use_Custom_Device != "yes" in the sheet
@@ -65,7 +83,9 @@ screenshots:
   enabled: false                # save per-lead debug screenshots (success/error/
                                 # step captures). false = off; the UI live preview
                                 # (live_view.png) is unaffected.
-  on_failure: true
+  on_failure: true              # keep the capture that explains a failure even
+                                # when `enabled` is false — this is what makes a
+                                # stuck step diagnosable after the fact.
   on_success: false
   directory: "screenshots"
 

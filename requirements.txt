@@ -9,6 +9,8 @@ google-auth-oauthlib==1.2.2
 # Configuration
 python-dotenv==1.1.0
 pyyaml==6.0.2
+# zoneinfo has no tz database on Windows; the paced scheduler needs this
+tzdata==2025.2
 
 # Logging
 structlog==25.4.0

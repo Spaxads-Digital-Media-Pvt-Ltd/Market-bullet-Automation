@@ -63,14 +63,16 @@ def _next_device() -> dict[str, Any]:
 
 log = structlog.get_logger(__name__)
 
+# US-consistent only.  The proxy pool exits on US residential IPs, so a
+# browser announcing fr-FR from a Texas address is a fraud signal — and every
+# form filler matches English UI text ("Employment", "Next Month", month
+# names), which a non-English locale breaks outright.
 _LOCALES = [
-    "en-US", "en-GB", "en-CA", "en-AU", "en-IN",
-    "es-ES", "es-MX", "fr-FR", "de-DE", "pt-BR",
+    "en-US", "en-US", "en-US", "en-CA",
 ]
 _TIMEZONES = [
     "America/New_York", "America/Chicago", "America/Denver",
-    "America/Los_Angeles", "Europe/London", "Europe/Paris",
-    "Asia/Tokyo", "Asia/Kolkata", "Australia/Sydney",
+    "America/Los_Angeles", "America/Phoenix",
 ]
 _COLOR_SCHEMES = ["light", "dark", "no-preference"]
 

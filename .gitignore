@@ -13,6 +13,8 @@ venv_arm64_broken/
 # Runtime output
 logs/
 screenshots/
+# Paced-run reports hold lead names and sheet rows
+reports/
 proxies.txt
 
 # OS cruft

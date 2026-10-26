@@ -17,7 +17,7 @@ import subprocess
 import threading
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -26,6 +26,7 @@ import requests as _requests
 import yaml
 
 from utils.lead_pacer import LeadPacer, ProcessingConfig
+from utils import run_reports
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, make_response, render_template_string, request
 
@@ -309,8 +310,15 @@ def _pacer_wait(offer_id: str, eng: dict, stop_event) -> "datetime | None":
         if wait is None:
             return None
         if wait <= 0.5:
-            eng["batch"] = {"waiting": False, "next_in": 0, "batch_num": 0}
-            return pacer.consume(offer_id)
+            rel = pacer.release_if_due(offer_id)
+            if rel is not None:
+                eng["batch"] = {"waiting": False, "next_in": 0, "batch_num": 0}
+                return rel
+            # Not actually due: a short wait also means "the window or the next
+            # slot opens shortly", and releasing on that charged a slot past its
+            # budget.  Re-evaluate instead of releasing early.
+            time.sleep(0.2)
+            continue
         eng["batch"] = {"waiting": True, "next_in": int(wait), "batch_num": 0}
         for _ in range(int(min(wait, 30))):
             if stop_event.is_set():
@@ -336,6 +344,10 @@ def _mk_engine() -> dict:
         "batch":      {"waiting": False, "next_in": 0, "batch_num": 0},
         "log_queue":  queue.Queue(maxsize=1000),
         "stats":      {"success": 0, "failed": 0, "total": 0, "processed": 0},
+        # Per-run detail behind the paced report: one entry per finished
+        # lead, plus why the engine stopped.
+        "run":        {"running": False, "started": None, "ended": None,
+                       "reason": "", "leads": []},
     }
 
 _engines: dict[str, dict] = {oid: _mk_engine() for oid in OFFERS}
@@ -383,6 +395,40 @@ def _log(offer_id: str, msg: str) -> None:
             except queue.Empty:
                 pass
         q.put_nowait(entry)
+
+
+_TERMINAL_STATUSES = {"success", "failed", "declined", "filtered", "stopped"}
+
+
+def _record_lead(offer_id: str, row_num: int, name: str, status: str, notes: str) -> None:
+    """Log one finished lead against this run.  Intermediate statuses (Retry,
+    In Progress) are skipped — only what the row ended up as is reported."""
+    if str(status).strip().lower() not in _TERMINAL_STATUSES:
+        return
+    _engines[offer_id]["run"]["leads"].append({
+        "time":   datetime.now(timezone.utc).isoformat(),
+        "row":    row_num,
+        "name":   name,
+        "status": str(status).strip(),
+        "notes":  str(notes or "")[:300],
+    })
+
+
+def _save_paced_report(offer_id: str) -> None:
+    """Rewrite this paced run's report.  Every offer in the run writes the same
+    report id, so whichever engine finishes last leaves the complete picture.
+    A reporting failure must never take an engine down with it."""
+    pacer, run_id = _active_pacer, _active_pacer_run_id
+    if pacer is None or not run_id or offer_id not in pacer.offers:
+        return
+    try:
+        run_reports.save(run_reports.build(
+            run_id, pacer,
+            {oid: _engines[oid]["run"] for oid in pacer.offers if oid in _engines},
+            {oid: OFFERS[oid]["name"] for oid in pacer.offers if oid in OFFERS},
+        ))
+    except Exception as e:
+        _log(offer_id, f"WARN  Could not write run report: {type(e).__name__}: {e}")
 
 
 def _get_outbound_ip(proxy_url: str | None) -> str:
@@ -471,6 +517,8 @@ def _run_engine(offer_id: str, target_url: str) -> None:
     skip_wait  = eng["skip_wait"]
     eng["running"] = True
     eng["stats"] = {"success": 0, "failed": 0, "total": 0, "processed": 0}
+    eng["run"] = {"running": True, "started": datetime.now(timezone.utc).isoformat(),
+                  "ended": None, "reason": "", "leads": []}
     eng["batch"] = {"waiting": False, "next_in": 0, "batch_num": 0}
     run_opts       = eng.get("run_opts") or {}
     max_leads      = run_opts.get("max_leads")
@@ -573,9 +621,28 @@ def _run_engine(offer_id: str, target_url: str) -> None:
         pending = sheet.get_pending_rows()
         if not pending:
             _log(offer_id, "WARN  No pending rows found. Nothing to do.")
+            eng["run"]["reason"] = "no pending rows"
             return
 
         eng["stats"]["total"] = len(pending)
+
+        # Wrap the sheet writer once rather than instrumenting each of the
+        # seven terminal branches below: whatever status reaches the sheet
+        # reaches the run record too, so the report cannot miss an outcome.
+        _row_name = {
+            r["_row_number"]: " ".join(
+                str(r.get(k) or "").strip() for k in ("First Name", "Last Name")
+            ).strip()
+            for r in pending
+        }
+        _sheet_update_row = sheet.update_row
+
+        def _recording_update_row(row_number, **kw):
+            _record_lead(offer_id, row_number, _row_name.get(row_number, ""),
+                         kw.get("status", ""), kw.get("notes", ""))
+            return _sheet_update_row(row_number, **kw)
+
+        sheet.update_row = _recording_update_row
         _log(offer_id, f"INFO  {len(pending)} pending row(s) to process")
         if max_leads:
             _log(offer_id, f"INFO  Lead limit: {max_leads}")
@@ -601,6 +668,7 @@ def _run_engine(offer_id: str, target_url: str) -> None:
                 if rel_dt is None:
                     if not stop_event.is_set():
                         _log(offer_id, "INFO  Pacer: lead budget complete for this offer -- stopping.")
+                        eng["run"]["reason"] = "pacer budget complete"
                     break
 
             row_num = row["_row_number"]
@@ -760,6 +828,7 @@ def _run_engine(offer_id: str, target_url: str) -> None:
             done += 1
             if max_leads and done >= max_leads:
                 _log(offer_id, f"INFO  Reached lead limit ({max_leads}) -- stopping.")
+                eng["run"]["reason"] = f"lead limit ({max_leads}) reached"
                 break
             more_remaining = done < len(pending)
             if batch_size and batch_interval and more_remaining and done % batch_size == 0:
@@ -784,10 +853,19 @@ def _run_engine(offer_id: str, target_url: str) -> None:
              f"Processed: {s['processed']}/{s['total']}")
 
     except Exception as e:
+        eng["run"]["reason"] = f"engine crashed: {type(e).__name__}: {e}"[:200]
         _log(offer_id, f"FATAL Engine crashed: {type(e).__name__}: {e!r}")
         _log(offer_id, traceback.format_exc())
     finally:
         eng["running"] = False
+        run = eng["run"]
+        run["running"] = False
+        run["ended"]   = datetime.now(timezone.utc).isoformat()
+        if not run["reason"]:
+            run["reason"] = ("stopped by user" if eng["stop_event"].is_set()
+                             else "completed")
+        if eng.get("paced"):
+            _save_paced_report(offer_id)
         eng["batch"]   = {"waiting": False, "next_in": 0, "batch_num": 0}
         eng["stop_event"].clear()
         eng["skip_wait"].clear()
@@ -1221,6 +1299,7 @@ h1 { font-size: 1.45rem; font-weight: 700; color: #7dd3fc; letter-spacing: -.5px
         <span class="us-clock-time" id="us-clock-time">--:--:--</span>
         <span class="us-clock-date" id="us-clock-date"></span>
       </div>
+      <button class="settings-btn" onclick="window.open('/reports','_blank')">&#128203; Reports</button>
       <button class="settings-btn" onclick="openSettings()">&#9881; Settings</button>
       <button class="stop-all" onclick="stopAll()">&#9632; Stop All Running</button>
     </div>
@@ -2609,6 +2688,46 @@ def api_pacing_stats():
     stats["offers"] = {o: OFFERS[o]["name"] for o in live_offers}
     stats["running"] = any(_engines[o]["running"] for o in live_offers)
     return jsonify(stats)
+
+
+# ── Paced-run reports ─────────────────────────────────────────────────────────
+
+_REPORTS_INDEX = """<!doctype html><html><head><meta charset="utf-8">
+<title>Paced run reports</title><style>
+body{font:14px -apple-system,Segoe UI,sans-serif;background:#0f1420;color:#e2e8f0;margin:24px}
+h1{font-size:20px;margin:0 0 14px} a{color:#7dd3fc} table{border-collapse:collapse;width:100%}
+th,td{border:1px solid #1e2d40;padding:6px 8px;text-align:left} th{background:#131926;color:#94a3b8}
+.sub{color:#94a3b8;margin-bottom:14px}
+</style></head><body><h1>Paced run reports</h1>
+<div class="sub">__NOTE__</div><table>
+<tr><th>Run</th><th>Status</th><th>Window</th><th>Offers</th><th>Done / planned</th><th>Updated</th></tr>
+__ROWS__</table></body></html>"""
+
+
+@app.route("/reports")
+def reports_index():
+    rows = run_reports.list_reports()
+    body = "".join(
+        f"<tr><td><a href=\"/reports/{r['id']}\">{r['run_id']}</a></td>"
+        f"<td>{r.get('status') or ''}</td><td>{r.get('window') or ''}</td>"
+        f"<td>{', '.join(n for n in (r.get('offers') or []) if n)}</td>"
+        f"<td>{r.get('done')} / {r.get('planned')}"
+        f" ({r.get('success')} success, {r.get('failed')} not)</td>"
+        f"<td>{(r.get('updated') or '')[:19].replace('T', ' ')} UTC</td></tr>"
+        for r in rows
+    ) or "<tr><td colspan=6>No paced runs recorded yet.</td></tr>"
+    note = (f"Reports are deleted automatically {run_reports.KEEP_DAYS} days "
+            f"after their last update.")
+    return Response(_REPORTS_INDEX.replace("__ROWS__", body).replace("__NOTE__", note),
+                    mimetype="text/html")
+
+
+@app.route("/reports/<report_id>")
+def report_detail(report_id: str):
+    report = run_reports.load(report_id)
+    if report is None:
+        return "Report not found.", 404
+    return Response(run_reports.render_html(report), mimetype="text/html")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
