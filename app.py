@@ -600,7 +600,7 @@ def _run_engine(offer_id: str, target_url: str) -> None:
         _log(offer_id, f"INFO  Target -> {target_url}")
         _log(offer_id, "INFO  Connecting to Google Sheets...")
 
-        from utils.sheet_handler import SheetHandler
+        from utils.sheet_handler import SheetHandler, is_transient
         from utils.proxy_manager import ProxyManager
         from utils.device_manager import DeviceManager
 
@@ -636,13 +636,34 @@ def _run_engine(offer_id: str, target_url: str) -> None:
             for r in pending
         }
         _sheet_update_row = sheet.update_row
+        _sheet_mark_in_progress = sheet.mark_in_progress
 
         def _recording_update_row(row_number, **kw):
             _record_lead(offer_id, row_number, _row_name.get(row_number, ""),
                          kw.get("status", ""), kw.get("notes", ""))
-            return _sheet_update_row(row_number, **kw)
+            try:
+                return _sheet_update_row(row_number, **kw)
+            except Exception as e:
+                # The sheet handler already retried for minutes.  A run that
+                # is paced across a whole day must outlive a network outage,
+                # so skip this write rather than crash the engine; a row left
+                # "In Progress" is reclaimed to Pending on the next run.
+                if not is_transient(e):
+                    raise
+                _log(offer_id, f"WARN  Sheet unreachable -- row {row_number} not marked "
+                               f"{kw.get('status', '')!r}: {type(e).__name__}: {e}")
+
+        def _safe_mark_in_progress(row_number):
+            try:
+                _sheet_mark_in_progress(row_number)
+            except Exception as e:
+                if not is_transient(e):
+                    raise
+                _log(offer_id, f"WARN  Sheet unreachable -- row {row_number} not marked "
+                               f"'In Progress': {type(e).__name__}: {e}")
 
         sheet.update_row = _recording_update_row
+        sheet.mark_in_progress = _safe_mark_in_progress
         _log(offer_id, f"INFO  {len(pending)} pending row(s) to process")
         if max_leads:
             _log(offer_id, f"INFO  Lead limit: {max_leads}")

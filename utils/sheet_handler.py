@@ -22,10 +22,22 @@ from typing import Any
 
 import gspread
 import requests
+from google.auth.exceptions import TransportError
 from google.oauth2.service_account import Credentials
 import structlog
 
 log = structlog.get_logger(__name__)
+
+
+def is_transient(e: BaseException) -> bool:
+    """True for network / quota errors that are worth retrying.  A token
+    refresh that times out raises google.auth's TransportError, which is
+    neither an OSError nor a requests exception — missing it here let a
+    single network blip crash a paced run that had hours left."""
+    if isinstance(e, gspread.exceptions.APIError):
+        code = getattr(getattr(e, "response", None), "status_code", 0)
+        return code in (429, 500, 502, 503, 504)
+    return isinstance(e, (OSError, requests.exceptions.RequestException, TransportError))
 
 _SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -129,19 +141,18 @@ class SheetHandler:
         self._headers = self._worksheet.row_values(1)
 
     def _retry(self, fn):
+        # ~3.5 min of backoff (plus request timeouts) so a short network drop
+        # or a laptop waking from sleep is ridden out instead of raised.
         last_err: Exception | None = None
-        for attempt in range(4):
+        for attempt in range(8):
             try:
                 return fn()
-            except gspread.exceptions.APIError as e:
-                code = getattr(getattr(e, "response", None), "status_code", 0)
-                if code not in (429, 500, 502, 503, 504):
+            except Exception as e:
+                if not is_transient(e):
                     raise
                 last_err = e
-            except (OSError, requests.exceptions.RequestException) as e:
-                last_err = e
             log.warning("sheet.retry", attempt=attempt + 1, error=str(last_err)[:90])
-            time.sleep(min(2 ** attempt, 8))
+            time.sleep(min(2 ** attempt, 60))
             try:
                 self._reconnect()
             except Exception:
@@ -219,7 +230,7 @@ class SheetHandler:
         got = self._read_cell(row_number, status_col)
         if got.lower() != str(status).strip().lower():
             # One retry after reconnect — stale worksheet metadata.
-            self._reconnect()
+            self._retry(self._reconnect)
             self._write_cells(cells, paint_status=status)
             got = self._read_cell(row_number, self._col_index("status"))
         if got.lower() != str(status).strip().lower():

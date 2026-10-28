@@ -1,13 +1,13 @@
 {
   "urls": {
     "to_get_fast_cash": "https://togetfastcash.com/",
-    "rapid_pay_day_fund": "https://rapidpaydayfund.com/",
-    "easy_cash_day": "https://easycashday.com/",
+    "rapid_pay_day_fund": "https://spaxadsdigital.trackog.net/c?oid=970&affid=468",
+    "easy_cash_day": "https://spaxadsdigital.trackog.net/c?oid=971&affid=468",
     "paydayed": "https://paydayed.com/"
   },
   "proxy": {
     "source": "rotating",
-    "rotating_url": "http://zeeshan_aliak0_gmail_com:Leodigital0990-country-US@la.residential.rayobyte.com:8000",
+    "rotating_url": "http://tFxQm6EDdVq1B4d3:mobile;us;;;@proxy.froxy.com:9000",
     "env_list": "http://user:pass@proxy1.example.com:8080,socks5://user:pass@proxy2.example.com:1080"
   },
   "scheduled_jobs": [],
