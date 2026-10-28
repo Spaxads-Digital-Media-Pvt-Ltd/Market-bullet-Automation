@@ -144,6 +144,7 @@ class FormFiller(BasePlatformFiller):
         seen: dict[str, int] = {}
         self._bank_advanced = False
         self._finish_popup = None
+        self._finish_clicked = False
         # Prior runs leave localStorage._fd — clear so completion detect is fresh.
         try:
             page.evaluate(
@@ -978,7 +979,11 @@ class FormFiller(BasePlatformFiller):
                 label = (loc.inner_text(timeout=1000) or "").strip()[:40] or "NEXT"
                 # Prefer React handler when CTA is Submit Loan Request.
                 if "submit" in label.lower():
-                    if self._react_click(page, sel):
+                    if getattr(self, "_finish_clicked", False):
+                        log.debug("form.next", label=label, via="already-submitted")
+                        return True
+                    if self._react_click(page, sel, once=True):
+                        self._finish_clicked = True
                         log.debug("form.next", label=label, via="react")
                         return True
                 try:
@@ -1013,16 +1018,20 @@ class FormFiller(BasePlatformFiller):
             pass
         return False
 
-    def _react_click(self, page: Page, selector: str) -> bool:
+    def _react_click(self, page: Page, selector: str, once: bool = False) -> bool:
         """Call React onClick on a button (Playwright/DOM click often does not).
 
         Important: always re-query the node so we get fresh props after a setState.
+
+        once=True: the synthetic DOM click is only a fallback when no React
+        handler was found.  React also handles that DOM click, so firing both
+        ran onClick twice — on Submit Loan Request that posted every lead twice.
         """
         try:
             # Give any prior setState a chance to commit before reading props.
             time.sleep(0.15)
             result = page.evaluate(
-                """(sel) => {
+                """([sel, once]) => {
                     const btn = document.querySelector(sel);
                     if (!btn) return 'missing';
                     const fire = (el) => {
@@ -1059,12 +1068,14 @@ class FormFiller(BasePlatformFiller):
                             how = fire(el);
                         }
                     }
-                    try {
-                        btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-                    } catch (e) {}
+                    if (!how || !once) {
+                        try {
+                            btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                        } catch (e) {}
+                    }
                     return how || 'dom-only';
                 }""",
-                selector,
+                [selector, once],
             )
             log.debug("form.react_click", selector=selector, result=result)
             return result not in (None, "missing")
@@ -1329,8 +1340,18 @@ class FormFiller(BasePlatformFiller):
         return False
 
     def _submit_finish(self, page: Page, row_number: int) -> None:
-        """Click Submit Loan Request via React onClick, then wait for processing popup."""
+        """Click Submit Loan Request exactly once, then wait for processing popup.
+
+        Every click that reaches the button's handler posts the lead again.  This
+        used to fire React onClick, a synthetic DOM click and a forced Playwright
+        click in a row, and the buyer's panel logged each person twice within a
+        second.  A second click now happens only when the first visibly did
+        nothing, and never on a later call for the same row."""
         self._finish_popup = None
+        if getattr(self, "_finish_clicked", False):
+            log.info("form.finish_cta", row=row_number, via="already-clicked")
+            self._wait_finish_modal(page, row_number)
+            return
         time.sleep(0.8)
         try:
             page.locator("button.f-wizard-step--buttons--next").first.scroll_into_view_if_needed(timeout=8000)
@@ -1338,7 +1359,7 @@ class FormFiller(BasePlatformFiller):
             pass
 
         clicked = False
-        if self._react_click(page, "button.f-wizard-step--buttons--next"):
+        if self._react_click(page, "button.f-wizard-step--buttons--next", once=True):
             clicked = True
             log.info("form.finish_cta", row=row_number, via="react-css")
         else:
@@ -1355,8 +1376,9 @@ class FormFiller(BasePlatformFiller):
                           preventDefault() {}, stopPropagation() {},
                           target: btn, currentTarget: btn, type: 'click',
                         });
+                      } else {
+                        btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
                       }
-                      btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
                       return true;
                     }"""
                 )
@@ -1366,14 +1388,40 @@ class FormFiller(BasePlatformFiller):
             except Exception as exc:
                 log.warning("form.finish_cta_failed", row=row_number, error=str(exc)[:100])
 
-        if clicked:
+        if not clicked:
             try:
-                page.locator("button.f-wizard-step--buttons--next").first.click(timeout=3000, force=True)
+                page.locator("button.f-wizard-step--buttons--next").first.click(timeout=3000)
+                clicked = True
+                log.info("form.finish_cta", row=row_number, via="playwright")
+            except Exception:
+                log.warning("form.finish_cta", row=row_number, via="none")
+        elif not self._finish_started(page, 10):
+            # The handler call registered nothing at all — one real click.
+            log.warning("form.finish_cta_retry", row=row_number, via="playwright")
+            try:
+                page.locator("button.f-wizard-step--buttons--next").first.click(timeout=3000)
             except Exception:
                 pass
-        else:
-            log.warning("form.finish_cta", row=row_number, via="none")
+        self._finish_clicked = clicked
+        self._wait_finish_modal(page, row_number)
 
+    def _finish_started(self, page: Page, secs: float) -> bool:
+        """True once the submit visibly kicked off: popup, submit flag, or the
+        page left the finish step."""
+        deadline = time.time() + secs
+        while time.time() < deadline:
+            try:
+                if self._completion_state(page) or self._current_step(page) != "finish":
+                    return True
+                if page.evaluate("() => !!window.__tgfc_native_submit_blocked"):
+                    return True
+            except Exception as exc:
+                if self._is_nav_error(exc):
+                    return True
+            time.sleep(0.4)
+        return False
+
+    def _wait_finish_modal(self, page: Page, row_number: int) -> None:
         try:
             page.wait_for_selector(
                 ".final-processing-modal, .f-modal.final-processing-modal, "
